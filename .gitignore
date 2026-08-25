@@ -1,0 +1,13 @@
+# Logs et fichiers de capture générés
+*.cap
+*.csv
+*.pcapng
+*.22000
+*.log
+*.kismet.netxml
+*.kismet.csv
+
+# Dossiers de session
+wifi_audit_logs/
+logs/
+.system_generated/
