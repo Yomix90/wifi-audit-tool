@@ -26,10 +26,7 @@ LOGDIR="$HOME/wifi_audit_logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
 SESSION_FILE="$HOME/.wifi_audit_session"
 
-# ==============================
-# MISE À JOUR AUTOMATIQUE
-# ==============================
-CURRENT_VERSION="2.1"
+CURRENT_VERSION="2.2"
 GITHUB_REPO="yomix90/wifi-audit-tool"
 BRANCH="main"
 SCRIPT_NAME="wifi_audit.sh"
@@ -71,37 +68,38 @@ pause() {
 draw_header() {
     clear
     echo -e "${CYAN}${BOLD}"
-    cat << "EOF"
-  __        ___ _____ _        _             _ _ _   
-  \ \      / (_)  ___(_)      / \  _   _  __| (_) |_ 
-   \ \ /\ / /| | |_  | |     / _ \| | | |/ _` | | __|
-    \ V  V / | |  _| | |    / ___ \ |_| | (_| | | |_ 
-     \_/\_/  |_|_|   |_|   /_/   \_\__,_|\__,_|_|\__|
-EOF
-    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil v${CURRENT_VERSION}${NC}"
-    echo -e "${BLUE}========================================================================${NC}"
+    echo "  ██╗    ██╗██╗███████╗██╗     █████╗ ██╗   ██╗██████╗ ██╗████████╗"
+    echo "  ██║    ██║██║██╔════╝██║    ██╔══██╗██║   ██║██╔══██╗██║╚══██╔══╝"
+    echo -e "${MAGENTA}${BOLD}  ██║ █╗ ██║██║█████╗  ██║    ███████║██║   ██║██║  ██║██║   ██║   "
+    echo "  ██║███╗██║██║██╔══╝  ██║    ██╔══██║██║   ██║██║  ██║██║   ██║   "
+    echo -e "${YELLOW}${BOLD}  ╚███╔███╔╝██║██║     ██║    ██║  ██║╚██████╔╝██████╔╝██║   ██║   "
+    echo "   ╚══╝╚══╝ ╚═╝╚═╝     ╚═╝    ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝   ╚═╝   "
+    echo -e "${CYAN}${BOLD}   ╔════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}${BOLD}   ║${NC}   ${YELLOW}${BOLD}⚡ WIFI AUDIT & SECURITY TOOLKIT ⚡${NC}  ${MAGENTA}${BOLD}[v${CURRENT_VERSION}]${NC}                 ${CYAN}${BOLD}║${NC}"
+    echo -e "${CYAN}${BOLD}   ╚════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────────────────${NC}"
 
     if [[ -n "$MONIFACE" ]]; then
         local current_ch
         current_ch=$(iw dev "$MONIFACE" info 2>/dev/null | awk '/channel/{print $2}' | head -1)
-        echo -e "  📡 ${BOLD}Interface:${NC} ${GREEN}$IFACE${NC} | ${BOLD}Monitor:${NC} ${GREEN}$MONIFACE (Actif)${NC}"
-        [[ -n "$current_ch" ]] && echo -e "  📻 ${BOLD}Canal actuel:${NC} ${YELLOW}$current_ch${NC}"
+        echo -e "  📡 ${BOLD}Interface:${NC} ${GREEN}${BOLD}$IFACE${NC} │ ${BOLD}Monitor:${NC} ${GREEN}${BOLD}$MONIFACE (Actif)${NC}"
+        [[ -n "$current_ch" ]] && echo -e "  📻 ${BOLD}Canal actuel:${NC} ${YELLOW}${BOLD}$current_ch${NC}"
     elif [[ -n "$IFACE" ]]; then
-        echo -e "  📡 ${BOLD}Interface:${NC} ${YELLOW}$IFACE${NC} | ${BOLD}Monitor:${NC} ${RED}Inactif${NC}"
+        echo -e "  📡 ${BOLD}Interface:${NC} ${YELLOW}${BOLD}$IFACE${NC} │ ${BOLD}Monitor:${NC} ${RED}${BOLD}Inactif${NC}"
     else
-        echo -e "  📡 ${BOLD}Interface:${NC} ${RED}Non sélectionnée${NC}"
+        echo -e "  📡 ${BOLD}Interface:${NC} ${RED}${BOLD}Non sélectionnée${NC}"
     fi
 
     if [[ -n "$TARGET_BSSID" ]]; then
         local essid_disp="${TARGET_ESSID:-<Masqué>}"
-        echo -e "  🎯 ${BOLD}Cible:${NC} ${GREEN}$essid_disp${NC} [BSSID: ${CYAN}$TARGET_BSSID${NC} | CH: ${YELLOW}$TARGET_CH${NC} | Sec: ${MAGENTA}$TARGET_ENC${NC}]"
+        echo -e "  🎯 ${BOLD}Cible Active:${NC} ${GREEN}${BOLD}$essid_disp${NC} │ BSSID: ${CYAN}${BOLD}$TARGET_BSSID${NC} │ CH: ${YELLOW}${BOLD}$TARGET_CH${NC} │ Sec: ${MAGENTA}${BOLD}$TARGET_ENC${NC}"
     else
-        echo -e "  🎯 ${BOLD}Cible:${NC} ${YELLOW}Aucune${NC}"
+        echo -e "  🎯 ${BOLD}Cible Active:${NC} ${YELLOW}Aucune (Scannez et sélectionnez un réseau)${NC}"
     fi
 
-    [[ -n "$SECOND_IFACE" ]] && echo -e "  📶 ${BOLD}2ème Interface (Evil Twin):${NC} ${GREEN}$SECOND_IFACE${NC}"
-    echo -e "  📁 ${BOLD}Logs:${NC} $LOGDIR"
-    echo -e "${BLUE}========================================================================${NC}"
+    [[ -n "$SECOND_IFACE" ]] && echo -e "  📶 ${BOLD}2ème Interface:${NC} ${GREEN}${BOLD}$SECOND_IFACE${NC}"
+    echo -e "  📁 ${BOLD}Dossier Logs:${NC} ${CYAN}$LOGDIR${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────────────────${NC}"
 }
 
 # ==============================
