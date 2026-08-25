@@ -17,9 +17,26 @@ Script Bash interactif et automatisé pour l'audit de sécurité et l'analyse de
 
 ---
 
-## 📋 Prérequis
+## 📦 Installation depuis GitHub
 
-Le script utilise les outils de la suite `aircrack-ng` et des utilitaires associés :
+Clonez le dépôt directement sur votre machine Linux :
+
+```bash
+# Cloner le dépôt
+git clone https://github.com/yomix90/wifi-audit-tool.git
+
+# Accéder au dossier
+cd wifi-audit-tool
+
+# Rendre le script exécutable
+chmod +x wifi_audit.sh
+```
+
+---
+
+## 📋 Dépendances & Prérequis
+
+Installez les outils nécessaires via `apt` (ou laissez le script les installer automatiquement au premier lancement) :
 
 ```bash
 sudo apt update
@@ -28,14 +45,10 @@ sudo apt install -y aircrack-ng wifite reaver pixiewps hcxdumptool hcxtools macc
 
 ---
 
-## 💻 Utilisation
+## 💻 Lancement
 
-1. Rendre le script exécutable :
-   ```bash
-   chmod +x wifi_audit.sh
-   ```
+Exécutez le script avec les privilèges root (`sudo`) :
 
-2. Lancer le script avec les privilèges administrateur :
-   ```bash
-   sudo ./wifi_audit.sh
-   ```
+```bash
+sudo ./wifi_audit.sh
+```
