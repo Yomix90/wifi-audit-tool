@@ -122,7 +122,7 @@ check_consent() {
 # ==============================
 # MISE À JOUR AUTOMATIQUE DEPUIS GITHUB
 # ==============================
-CURRENT_VERSION="2.1"
+CURRENT_VERSION="2.5"
 GITHUB_REPO="yomix90/wifi-audit-tool"
 SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/wifi_audit.sh"
 
