@@ -69,7 +69,7 @@ draw_header() {
     \ V  V / | |  _| | |    / ___ \ |_| | (_| | | |_ 
      \_/\_/  |_|_|   |_|   /_/   \_\__,_|\__,_|_|\__|
 EOF
-    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil v2.0${NC}"
+    echo -e "${NC}            ${YELLOW}Audit & Analyse de Sécurité Sans-Fil v2.1${NC}"
     echo -e "${BLUE}========================================================================${NC}"
     
     if [[ -n "$MONIFACE" ]]; then
@@ -122,7 +122,7 @@ check_consent() {
 # ==============================
 # MISE À JOUR AUTOMATIQUE DEPUIS GITHUB
 # ==============================
-CURRENT_VERSION="2.0"
+CURRENT_VERSION="2.1"
 GITHUB_REPO="yomix90/wifi-audit-tool"
 SCRIPT_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/wifi_audit.sh"
 
@@ -170,7 +170,7 @@ check_update() {
             fi
         fi
     else
-        ok "Vous avez la dernière version (v${CURRENT_VERSION})."
+        ok "Vous avez la dernière version (v${})."
     fi
     return 0
 }
@@ -1259,7 +1259,7 @@ main_menu() {
         echo "  [1] 📡 Gestion Interface & Monitor"
         echo "  [2] 🔍 Scanner & Sélectionner une Cible"
         echo "  [3] 🎯 Captures Classiques (Handshake/PMKID/WPS)"
-        echo "  [4] 👻 ${RED}Attaques Avancées (Evil Twin/Karma)${NC}"
+        echo -e "  [4] 👻 ${RED}Attaques Avancées (Evil Twin/Karma)${NC}"
         echo "  [5] 🔑 Cracking & Analyse"
         echo "  [6] 🛡️ Tests de Robustesse (KRACK/FragAttacks)"
         echo "  [7] 📦 Vérifier / Installer dépendances"
